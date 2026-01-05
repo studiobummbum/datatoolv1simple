@@ -1,24 +1,62 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
+import io
 
 # --- CẤU HÌNH TRANG ---
-st.set_page_config(page_title="AdMob LTV Report V3", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="AdMob LTV Report V4 - Ultimate Fix", layout="wide", page_icon="🛡️")
 
-# --- HÀM LOAD DATA ---
+# --- HÀM LOAD DATA (PHIÊN BẢN SIÊU TRÂU BÒ) ---
 @st.cache_data
 def load_data(file):
-    try:
-        df = pd.read_csv(file)
-    except:
-        file.seek(0)
-        df = pd.read_csv(file, encoding='latin1')
+    # Danh sách các encoding phổ biến có thể gặp
+    encodings = ['utf-8', 'utf-16', 'utf-16le', 'latin1', 'cp1252']
+    delimiters = [',', '\t', ';'] # Phẩy, Tab, Chấm phẩy
     
-    # 1. Chuẩn hóa tên cột (xóa khoảng trắng)
+    df = None
+    error_log = []
+
+    # Reset file pointer về đầu
+    file.seek(0)
+    bytes_data = file.read()
+    
+    # Thử từng encoding
+    for enc in encodings:
+        try:
+            # Decode bytes thành string để check delimiter
+            content = bytes_data.decode(enc)
+            
+            # Auto-detect delimiter bằng cách đếm dòng đầu tiên
+            first_line = content.split('\n')[0]
+            detected_sep = ',' # Mặc định
+            
+            # Logic đơn giản: cái nào xuất hiện nhiều nhất ở dòng đầu thì là separator
+            max_count = 0
+            for d in delimiters:
+                if first_line.count(d) > max_count:
+                    max_count = first_line.count(d)
+                    detected_sep = d
+            
+            # Đọc dữ liệu với encoding và separator tìm được
+            df = pd.read_csv(io.StringIO(content), sep=detected_sep)
+            
+            # Nếu đọc được và có ít nhất 1 cột thì break ngay
+            if len(df.columns) > 1:
+                break
+        except Exception as e:
+            error_log.append(f"Thử {enc} thất bại: {str(e)}")
+            continue
+            
+    if df is None:
+        st.error("❌ Không thể đọc file với mọi loại encoding. File có thể bị hỏng.")
+        st.stop()
+
+    # --- XỬ LÝ DATA SAU KHI ĐỌC ĐƯỢC ---
+    
+    # 1. Chuẩn hóa tên cột (xóa khoảng trắng thừa)
     df.columns = df.columns.str.strip()
     
-    # 2. AUTO-MAPPING: Tự động đổi tên cột về chuẩn nếu tên khác
-    # Dictionary map: {Tên chuẩn: [Các tên có thể gặp]}
+    # 2. AUTO-MAPPING: Tự động đổi tên cột về chuẩn
     column_mapping = {
         'Install date': ['Date', 'Cohort Date', 'install_date'],
         'Days since install': ['Day', 'Days', 'days_since_install'],
@@ -27,12 +65,11 @@ def load_data(file):
         'Install country': ['Country', 'Region', 'install_country']
     }
     
-    # Duyệt qua map để rename
     rename_dict = {}
     for standard_col, variations in column_mapping.items():
-        if standard_col not in df.columns: # Nếu chưa có tên chuẩn
+        if standard_col not in df.columns:
             for var in variations:
-                if var in df.columns: # Nếu tìm thấy biến thể
+                if var in df.columns:
                     rename_dict[var] = standard_col
                     break
     
@@ -46,10 +83,10 @@ def load_data(file):
     return df
 
 # --- GIAO DIỆN ---
-st.title("🛡️ AdMob LTV Analyzer (V3 - Debug Mode)")
-st.markdown("Phiên bản này tự động sửa tên cột và báo lỗi chi tiết nếu file không đúng format.")
+st.title("🛡️ AdMob LTV Analyzer (V4 - Encoding Fix)")
+st.markdown("Phiên bản này chấp hết các loại file UTF-16, Tab-separated hay Comma-separated.")
 
-uploaded_file = st.file_uploader("Upload file admob-report.csv", type=['csv'])
+uploaded_file = st.file_uploader("Upload file admob-report.csv", type=['csv', 'txt'])
 
 if uploaded_file:
     df = load_data(uploaded_file)
@@ -60,10 +97,10 @@ if uploaded_file:
     
     if missing_cols:
         st.error(f"❌ **LỖI FILE: Thiếu các cột bắt buộc sau:** {missing_cols}")
-        st.warning("⚠️ **Các cột hiện có trong file của sếp:**")
+        st.warning("⚠️ **Các cột hiện có trong file (đã đọc được):**")
         st.code(list(df.columns))
-        st.info("💡 Sếp kiểm tra lại file CSV hoặc đổi tên cột trong file cho khớp nhé.")
-        st.stop() # Dừng chương trình tại đây để không bị crash
+        st.info("💡 Sếp kiểm tra lại tên cột. Code đã cố gắng tự sửa tên nhưng chưa khớp.")
+        st.stop()
         
     # --- NẾU ĐỦ CỘT THÌ CHẠY TIẾP ---
     
@@ -93,7 +130,6 @@ if uploaded_file:
         
         # Lấy cột Installs (Lấy ở ngày 0)
         df_installs = df_country[df_country['Days since install'] == 0][['Install date', 'Installs']]
-        # Group by date để tránh duplicate index nếu data bị lỗi
         df_installs = df_installs.groupby('Install date')['Installs'].sum()
         
         # Merge
@@ -157,4 +193,4 @@ if uploaded_file:
     st.dataframe(display_df, column_config=column_config, hide_index=True, use_container_width=True)
 
 else:
-    st.info("Sếp upload file CSV đi ạ. Em đang đợi đây...")
+    st.info("Sếp upload lại file đi ạ. Lần này em bao thầu cả UTF-16 lẫn Tab separator luôn!")
