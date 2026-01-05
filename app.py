@@ -2,121 +2,109 @@ import streamlit as st
 import pandas as pd
 import io
 
-# Cấu hình trang (Phải đặt đầu tiên)
-st.set_page_config(page_title="Monetization Data Tool", layout="wide")
+# Cấu hình trang
+st.set_page_config(page_title="AdMob Cohort Analyzer", layout="wide")
 
-st.title("🛠️ Monetization Data Cleaner")
-st.markdown("Tool xử lý file CSV lỗi format, lệch dòng (IronSource, AppLovin, AdMob, etc.)")
+st.title("📊 AdMob Cohort LTV Analyzer (Auto-Pivot)")
+st.markdown("Upload file CSV AdMob Cohort. Hệ thống sẽ tự động xoay dữ liệu từ Dọc sang Ngang.")
 
-# --- HÀM XỬ LÝ LOGIC (Đã nâng cấp Auto-Detect Encoding) ---
-def clean_currency(x):
-    if isinstance(x, str):
-        # Xóa $, dấu phẩy, khoảng trắng thừa
-        return x.replace('$', '').replace(',', '').strip()
-    return x
-
-@st.cache_data(ttl=300)
-def process_monetization_report(uploaded_file):
-    # Danh sách các encoding thường gặp trong report Ad Tech
-    encodings_to_try = ['utf-8', 'utf-16', 'utf-8-sig', 'latin-1', 'cp1252']
-    
-    df_temp = None
-    used_encoding = None
-    error_msg = ""
-
-    # 1. Thử đọc file với các encoding khác nhau
-    for encoding in encodings_to_try:
-        try:
-            uploaded_file.seek(0) # Reset con trỏ về đầu file trước mỗi lần thử
-            # Đọc thử 20 dòng để check encoding và tìm header
-            df_temp = pd.read_csv(uploaded_file, header=None, nrows=20, encoding=encoding, sep=None, engine='python')
-            used_encoding = encoding
-            break # Đọc được rồi thì thoát vòng lặp
-        except Exception as e:
-            error_msg = str(e)
-            continue
-
-    if df_temp is None:
-        return None, f"Không đọc được file với các định dạng phổ biến. Lỗi cuối cùng: {error_msg}"
-
-    try:
-        # 2. Tìm dòng Header (Logic dò tìm thông minh)
-        header_row_index = 0
-        found = False
-        
-        # Reset file pointer để đọc full file với encoding đã tìm được
-        uploaded_file.seek(0)
-        
-        # Duyệt qua bảng tạm để tìm keywords
-        for idx, row in df_temp.iterrows():
-            row_str = row.astype(str).str.lower().tolist()
-            # Tìm keywords đặc trưng của report (Date, Country, Impressions, Est. Earnings...)
-            keywords = ['date', 'country', 'ad unit', 'application', 'impressions', 'estimated earnings', 'requests']
-            if any(k in str(s) for s in row_str for k in keywords):
-                header_row_index = idx
-                found = True
-                break
-        
-        # 3. Đọc lại toàn bộ file với header đúng
-        # Lưu ý: sep=None và engine='python' giúp tự động nhận diện dấu phẩy hoặc tab
-        df = pd.read_csv(uploaded_file, header=header_row_index, encoding=used_encoding, sep=None, engine='python')
-        
-        # 4. Chuẩn hóa dữ liệu
-        df.columns = df.columns.str.strip() # Xóa khoảng trắng ở tên cột
-        
-        # Xử lý cột Date (nếu có)
-        date_cols = [c for c in df.columns if 'date' in c.lower()]
-        if date_cols:
-            col_name = date_cols[0]
-            df[col_name] = pd.to_datetime(df[col_name], errors='coerce')
-            df = df.dropna(subset=[col_name]) # Bỏ dòng tổng cộng hoặc rác ở cuối
-
-        # Xử lý Số (Currency, Number)
-        # Loại trừ các cột text
-        exclude_cols = ['Date', 'Country', 'Campaign', 'Ad Network', 'Ad Unit', 'App', 'Platform']
-        numeric_cols = [c for c in df.columns if not any(ex in c for ex in exclude_cols)]
-        
-        for col in numeric_cols:
-            # Chỉ xử lý nếu cột kiểu object (string)
-            if df[col].dtype == 'object':
-                df[col] = df[col].apply(clean_currency)
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-
-        return df, f"Encoding: {used_encoding} | Header line: {header_row_index}"
-
-    except Exception as e:
-        return None, f"Lỗi xử lý data: {str(e)}"
-
-# --- GIAO DIỆN CHÍNH ---
-
-uploaded_file = st.file_uploader("Upload file CSV report vào đây sếp ơi", type=['csv', 'txt'])
+# Upload file
+uploaded_file = st.file_uploader("Chọn file CSV từ AdMob", type=['csv'])
 
 if uploaded_file is not None:
-    with st.spinner('Đang soi encoding và xử lý dữ liệu...'):
-        df_result, debug_info = process_monetization_report(uploaded_file)
+    try:
+        # --- 1. ĐỌC FILE & XỬ LÝ LỖI SYNTAX ---
+        # AdMob CSV đôi khi bị lỗi dòng hoặc format lạ, dùng on_bad_lines='skip' để an toàn
+        # skiprows=2: Thường report AdMob có 2 dòng tiêu đề thừa ở trên cùng
+        try:
+            df = pd.read_csv(uploaded_file, skiprows=2, on_bad_lines='skip')
+        except:
+            # Nếu lỗi encoding hoặc format, thử đọc lại với encoding khác và không skip dòng
+            uploaded_file.seek(0)
+            df = pd.read_csv(uploaded_file, encoding='utf-16', sep='\t', on_bad_lines='skip')
+
+        # --- 2. CLEAN DATA (Làm sạch) ---
+        df.columns = df.columns.str.strip() # Xóa khoảng trắng thừa ở tên cột
         
-        if df_result is not None:
-            st.success(f"✅ Xử lý thành công! ({debug_info})")
-            
-            # Hiển thị thống kê nhanh
-            st.write(f"📊 **Tổng quan:** {df_result.shape[0]} dòng dữ liệu.")
-            
-            # Hiển thị data
-            st.dataframe(df_result, use_container_width=True)
-            
-            # Nút download
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                df_result.to_excel(writer, index=False, sheet_name='Cleaned Data')
-                
-            st.download_button(
-                label="📥 Tải về file Excel sạch đẹp",
-                data=buffer,
-                file_name="cleaned_monet_data.xlsx",
-                mime="application/vnd.ms-excel"
-            )
-        else:
-            st.error(f"❌ Vẫn lỗi sếp ơi: {debug_info}")
+        # Tự động tìm cột dựa trên từ khóa (Smart Mapping)
+        cols = df.columns.str.lower()
+        
+        col_date = next((c for c in df.columns if 'date' in c.lower()), None)
+        col_country = next((c for c in df.columns if 'country' in c.lower()), None)
+        col_day = next((c for c in df.columns if 'day' in c.lower() and 'install' in c.lower()), None) # Days since install
+        col_installs = next((c for c in df.columns if 'install' in c.lower() and 'day' not in c.lower() and 'date' not in c.lower()), None)
+        
+        # Tìm cột LTV (Ưu tiên cột tổng hợp, nếu không có thì lấy cột doanh thu)
+        col_ltv = next((c for c in df.columns if 'ltv' in c.lower()), None)
+        if not col_ltv:
+             col_ltv = next((c for c in df.columns if 'revenue' in c.lower() or 'estimated earnings' in c.lower()), None)
+
+        # Kiểm tra nếu thiếu cột quan trọng
+        if not all([col_date, col_country, col_day, col_ltv]):
+            st.error("❌ Không nhận diện được cấu trúc file. Sếp kiểm tra lại xem có đúng file Cohort không nhé.")
+            st.write("Các cột tìm được:", {"Date": col_date, "Country": col_country, "Day": col_day, "LTV": col_ltv})
+            st.stop()
+
+        # Đổi tên về chuẩn
+        df = df.rename(columns={
+            col_date: 'Date',
+            col_country: 'Country',
+            col_day: 'Day',
+            col_installs: 'Installs',
+            col_ltv: 'LTV'
+        })
+
+        # Convert Date
+        df['Date'] = pd.to_datetime(df['Date'], errors='coerce').dt.date
+        df = df.dropna(subset=['Date']) # Bỏ dòng không có ngày tháng
+
+        # --- 3. LOGIC XOAY TRỤC (PIVOT) ---
+        # Đây là bước biến đổi dữ liệu như em giải thích
+        
+        # Chỉ lấy D0, D1, D3 (Sếp muốn thêm D7, D14 thì thêm vào list này)
+        target_days = [0, 1, 3]
+        df_filtered = df[df['Day'].isin(target_days)].copy()
+
+        # Pivot Table:
+        # - Giữ nguyên cột Date, Country, Installs làm mốc (Index)
+        # - Lấy giá trị cột 'Day' biến thành các cột mới (Columns)
+        # - Điền giá trị 'LTV' vào các ô tương ứng (Values)
+        pivot_df = df_filtered.pivot_table(
+            index=['Date', 'Country', 'Installs'], 
+            columns='Day', 
+            values='LTV', 
+            aggfunc='sum' # Dùng sum để gom nếu có dòng trùng, nhưng thường là lấy giá trị duy nhất
+        ).reset_index()
+
+        # Đổi tên cột 0, 1, 3 thành LTV D0, LTV D1...
+        pivot_df.columns.name = None
+        rename_map = {d: f'LTV D{d}' for d in target_days}
+        pivot_df = pivot_df.rename(columns=rename_map)
+
+        # Fill 0 cho những ô bị trống (ví dụ mới chạy hôm nay thì chưa có D1, D3)
+        pivot_df = pivot_df.fillna(0)
+        
+        # Sắp xếp
+        pivot_df = pivot_df.sort_values(by=['Date', 'Installs'], ascending=[False, False])
+
+        # --- 4. HIỂN THỊ ---
+        st.subheader("✅ Bảng dữ liệu đã xử lý")
+        
+        # Format hiển thị
+        st.dataframe(
+            pivot_df.style.format({
+                'Installs': '{:,.0f}',
+                'LTV D0': '${:.4f}',
+                'LTV D1': '${:.4f}',
+                'LTV D3': '${:.4f}'
+            }).background_gradient(subset=['LTV D0', 'LTV D1', 'LTV D3'], cmap='Greens'),
+            use_container_width=True,
+            height=600
+        )
+
+    except Exception as e:
+        st.error(f"❌ Lỗi nghiêm trọng: {str(e)}")
+        st.warning("Sếp thử mở file CSV bằng Excel, Save As lại dạng 'CSV (Comma delimited)' rồi upload lại xem sao ạ.")
 
 else:
-    st.info("👈 Chưa có file nào được upload.")
+    st.info("👋 Chờ sếp upload file CSV...")
