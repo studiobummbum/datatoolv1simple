@@ -203,9 +203,9 @@ st.markdown("""
 
 col1, col2 = st.columns(2)
 with col1:
-    cohort_file = st.file_uploader("1. Upload Cohort File (CSV)", type=['csv'])
+    cohort_file = st.file_uploader("1. Upload Cohort File LTV D0 và LTV D3 (CSV)", type=['csv'])
 with col2:
-    ads_file = st.file_uploader("2. Upload Ads File (Optional - CSV)", type=['csv'])
+    ads_file = st.file_uploader("2. Upload File Admob có chỉ số Ads ARPV (Optional - CSV)", type=['csv'])
 
 if cohort_file:
     if st.button("Analyze Data", type="primary"):
