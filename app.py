@@ -1,10 +1,11 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import numpy as np
 
 # --- CẤU HÌNH TRANG ---
 st.set_page_config(
-    page_title="UA Report Mapper V2.1 (Fix Encoding)",
+    page_title="UA Report Mapper V2.2 (Fix Logic)",
     page_icon="🎯",
     layout="wide"
 )
@@ -36,8 +37,8 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- HEADER ---
-st.title("🎯 UA Report Mapper V2.1")
-st.markdown("**Logic mới:** Phân tích trực tiếp từ 1 file Cohort (chứa cả Cost & Revenue).")
+st.title("🎯 UA Report Mapper V2.2")
+st.markdown("**Logic mới:** Fix lỗi 'Ambiguous Truth Value' và tối ưu bộ lọc.")
 st.markdown("---")
 
 # --- BƯỚC 1: UPLOAD FILE ---
@@ -46,34 +47,28 @@ uploaded_file = st.sidebar.file_uploader("Chọn file CSV Cohort của sếp", t
 
 if uploaded_file:
     try:
-        # --- FIX LỖI ENCODING Ở ĐÂY ---
-        # Thử đọc bằng utf-8 trước, nếu lỗi thì thử utf-16 (format thường gặp của AdMob/Excel)
+        # --- FIX LỖI ENCODING (Giữ nguyên từ V2.1) ---
         try:
             df = pd.read_csv(uploaded_file, encoding='utf-8')
         except UnicodeDecodeError:
-            uploaded_file.seek(0) # Reset con trỏ file về đầu
-            df = pd.read_csv(uploaded_file, encoding='utf-16', sep='\t') # UTF-16 thường đi kèm dấu phân cách tab (\t)
+            uploaded_file.seek(0)
+            df = pd.read_csv(uploaded_file, encoding='utf-16', sep='\t')
         except pd.errors.ParserError:
-             # Fallback: Thử đọc utf-16 nhưng dấu phẩy (ít gặp hơn nhưng cứ thủ sẵn)
             uploaded_file.seek(0)
             df = pd.read_csv(uploaded_file, encoding='utf-16')
 
         st.sidebar.success(f"Đã load: {uploaded_file.name}")
         
-        # Hiển thị raw data để sếp dễ mapping
         with st.expander("👀 Xem trước dữ liệu thô (5 dòng đầu)"):
             st.dataframe(df.head())
 
-        # --- BƯỚC 2: MAPPING CỘT (QUAN TRỌNG) ---
+        # --- BƯỚC 2: MAPPING CỘT ---
         st.sidebar.header("⚙️ 2. Mapping Cột")
-        st.sidebar.info("Chọn cột tương ứng trong file CSV của sếp:")
-        
         all_columns = df.columns.tolist()
         
-        # Tự động đoán tên cột (nếu có)
         def get_index(options, keywords):
             for i, opt in enumerate(options):
-                if any(k.lower() in opt.lower() for k in keywords):
+                if any(k.lower() in str(opt).lower() for k in keywords):
                     return i
             return 0
 
@@ -84,16 +79,20 @@ if uploaded_file:
         col_revenue = st.sidebar.selectbox("Cột Doanh thu (LTV/Revenue):", all_columns, index=get_index(all_columns, ['revenue', 'ltv', 'earnings', 'value']))
 
         # --- BƯỚC 3: XỬ LÝ DATA ---
-        # Chuẩn hóa dữ liệu
         df_clean = df.copy()
+        
+        # 1. Xử lý ngày tháng: Chuyển về datetime object chuẩn
         df_clean[col_date] = pd.to_datetime(df_clean[col_date], errors='coerce')
         
-        # Ép kiểu số (loại bỏ ký tự lạ như '$', ',')
+        # 2. Xử lý số liệu: Loại bỏ ký tự lạ và ép kiểu số
         for col in [col_cost, col_installs, col_revenue]:
-            # Chuyển về string -> replace -> numeric. Handle cả trường hợp cột đã là số sẵn.
-            df_clean[col] = pd.to_numeric(df_clean[col].astype(str).str.replace(r'[$,]', '', regex=True), errors='coerce').fillna(0)
+            # Convert to string first to handle object types safely, then replace
+            df_clean[col] = pd.to_numeric(
+                df_clean[col].astype(str).str.replace(r'[$,]', '', regex=True), 
+                errors='coerce'
+            ).fillna(0)
 
-        # Đổi tên cột về chuẩn để code dễ xử lý
+        # 3. Đổi tên cột
         df_clean = df_clean.rename(columns={
             col_date: 'Date',
             col_country: 'Country',
@@ -102,42 +101,55 @@ if uploaded_file:
             col_revenue: 'Revenue'
         })
 
-        # Xóa các dòng mà Date bị NaT (do file csv có thể có dòng tổng cộng ở cuối)
+        # 4. Xóa dòng lỗi Date (NaT)
         df_clean = df_clean.dropna(subset=['Date'])
 
-        # Tính toán các chỉ số KPI
-        # Tránh chia cho 0
-        df_clean['CPI'] = df_clean.apply(lambda x: x['Cost'] / x['Installs'] if x['Installs'] > 0 else 0, axis=1)
-        df_clean['ROAS'] = df_clean.apply(lambda x: (x['Revenue'] / x['Cost']) * 100 if x['Cost'] > 0 else 0, axis=1)
+        # 5. Tính KPI
+        df_clean['CPI'] = np.where(df_clean['Installs'] > 0, df_clean['Cost'] / df_clean['Installs'], 0)
+        df_clean['ROAS'] = np.where(df_clean['Cost'] > 0, (df_clean['Revenue'] / df_clean['Cost']) * 100, 0)
         
-        # --- BƯỚC 4: BỘ LỌC (FILTER) ---
+        # --- BƯỚC 4: BỘ LỌC (FIX LỖI AMBIGUOUS Ở ĐÂY) ---
         st.header("🔍 Bộ lọc dữ liệu")
+        
+        if df_clean.empty:
+            st.error("Dữ liệu sau khi xử lý bị rỗng. Vui lòng kiểm tra lại file CSV hoặc mapping cột.")
+            st.stop()
+
         col1, col2 = st.columns(2)
         
+        # Lấy min/max date từ data
+        min_date = df_clean['Date'].min().date() # Chuyển về .date() để lấy ngày thuần túy
+        max_date = df_clean['Date'].max().date()
+
         with col1:
-            # Lọc theo ngày
-            if not df_clean.empty:
-                min_date = df_clean['Date'].min()
-                max_date = df_clean['Date'].max()
-                date_range = st.date_input("Chọn khoảng thời gian:", [min_date, max_date])
-            else:
-                st.warning("Không tìm thấy dữ liệu ngày tháng hợp lệ.")
-                st.stop()
+            date_range = st.date_input(
+                "Chọn khoảng thời gian:", 
+                value=(min_date, max_date),
+                min_value=min_date,
+                max_value=max_date
+            )
         
         with col2:
-            # Lọc theo Country
             unique_countries = ['All'] + sorted(df_clean['Country'].unique().astype(str).tolist())
             selected_country = st.selectbox("Chọn Quốc gia:", unique_countries)
 
-        # Áp dụng bộ lọc
-        if len(date_range) == 2:
-            mask = (df_clean['Date'] >= pd.to_datetime(date_range[0])) & (df_clean['Date'] <= pd.to_datetime(date_range[1]))
+        # Logic lọc an toàn hơn
+        # Kiểm tra xem date_range có đủ 2 giá trị (start, end) không
+        if isinstance(date_range, tuple) and len(date_range) == 2:
+            start_date, end_date = date_range
+            # Convert cột Date trong DF về .date() để so sánh chính xác
+            mask = (df_clean['Date'].dt.date >= start_date) & (df_clean['Date'].dt.date <= end_date)
+            
             if selected_country != 'All':
                 mask = mask & (df_clean['Country'] == selected_country)
             
             df_filtered = df_clean[mask]
+        else:
+            # Nếu chưa chọn xong ngày, hiển thị toàn bộ hoặc data mặc định
+            df_filtered = df_clean
 
-            # --- BƯỚC 5: HIỂN THỊ METRICS TỔNG QUAN ---
+        # --- BƯỚC 5: HIỂN THỊ DASHBOARD ---
+        if not df_filtered.empty:
             st.markdown("### 📊 Tổng quan hiệu suất")
             
             total_spend = df_filtered['Cost'].sum()
@@ -146,79 +158,66 @@ if uploaded_file:
             
             avg_cpi = total_spend / total_installs if total_installs > 0 else 0
             avg_roas = (total_revenue / total_spend * 100) if total_spend > 0 else 0
-            net_profit = total_revenue - total_spend
 
             m1, m2, m3, m4, m5 = st.columns(5)
-            m1.metric("Tổng Chi Phí (Spend)", f"${total_spend:,.2f}")
+            m1.metric("Tổng Chi Phí", f"${total_spend:,.2f}")
             m2.metric("Tổng Installs", f"{total_installs:,.0f}")
-            m3.metric("CPI Trung Bình", f"${avg_cpi:,.3f}", delta_color="inverse") # CPI thấp là tốt
-            m4.metric("Tổng Doanh Thu (LTV)", f"${total_revenue:,.2f}")
-            m5.metric("ROAS Tổng", f"{avg_roas:,.2f}%", delta=f"{avg_roas-100:.2f}% (vs BEP)" if avg_roas > 0 else None)
+            m3.metric("CPI", f"${avg_cpi:,.3f}", delta_color="inverse")
+            m4.metric("Doanh Thu", f"${total_revenue:,.2f}")
+            m5.metric("ROAS", f"{avg_roas:,.2f}%", delta=f"{avg_roas-100:.2f}%" if avg_roas > 0 else None)
 
-            # --- BƯỚC 6: BIỂU ĐỒ ---
             st.markdown("---")
             c1, c2 = st.columns(2)
 
-            # Chart 1: Xu hướng Spend vs Revenue
             with c1:
                 st.subheader("💸 Xu hướng Spend vs Revenue")
                 daily_stats = df_filtered.groupby('Date')[['Cost', 'Revenue']].sum().reset_index()
-                fig_trend = px.line(daily_stats, x='Date', y=['Cost', 'Revenue'], 
-                                    color_discrete_map={"Cost": "#ef553b", "Revenue": "#00cc96"},
-                                    markers=True)
-                st.plotly_chart(fig_trend, use_container_width=True)
+                if not daily_stats.empty:
+                    fig_trend = px.line(daily_stats, x='Date', y=['Cost', 'Revenue'], 
+                                        color_discrete_map={"Cost": "#ef553b", "Revenue": "#00cc96"},
+                                        markers=True)
+                    st.plotly_chart(fig_trend, use_container_width=True)
+                else:
+                    st.info("Không đủ dữ liệu để vẽ biểu đồ xu hướng.")
 
-            # Chart 2: Scatter Plot CPI vs ROAS (theo Country)
             with c2:
-                st.subheader("🌍 Hiệu suất theo Quốc gia (Bubble Chart)")
+                st.subheader("🌍 Hiệu suất Quốc gia (Top 20 Spend)")
                 country_stats = df_filtered.groupby('Country').agg({
-                    'Cost': 'sum',
-                    'Installs': 'sum',
-                    'Revenue': 'sum'
+                    'Cost': 'sum', 'Installs': 'sum', 'Revenue': 'sum'
                 }).reset_index()
                 
-                country_stats['CPI'] = country_stats['Cost'] / country_stats['Installs']
-                country_stats['ROAS'] = (country_stats['Revenue'] / country_stats['Cost']) * 100
+                country_stats['CPI'] = np.where(country_stats['Installs']>0, country_stats['Cost']/country_stats['Installs'], 0)
+                country_stats['ROAS'] = np.where(country_stats['Cost']>0, (country_stats['Revenue']/country_stats['Cost'])*100, 0)
                 
-                # Chỉ hiện country có spend > 0 để đỡ rối
+                # Lọc top 20 spend để chart đỡ lag nếu nhiều country
+                country_stats = country_stats.sort_values('Cost', ascending=False).head(20)
                 country_stats = country_stats[country_stats['Cost'] > 0]
 
-                fig_bubble = px.scatter(country_stats, x="CPI", y="ROAS",
-                                        size="Cost", color="Country",
-                                        hover_name="Country",
-                                        title="Tương quan CPI vs ROAS (Size = Spend)",
-                                        template="plotly_white")
-                # Kẻ đường hòa vốn (ROAS 100%)
-                fig_bubble.add_hline(y=100, line_dash="dash", line_color="green", annotation_text="Break Even (100%)")
-                st.plotly_chart(fig_bubble, use_container_width=True)
+                if not country_stats.empty:
+                    fig_bubble = px.scatter(country_stats, x="CPI", y="ROAS",
+                                            size="Cost", color="Country",
+                                            hover_name="Country",
+                                            title="Top 20 Countries by Spend",
+                                            template="plotly_white")
+                    fig_bubble.add_hline(y=100, line_dash="dash", line_color="green")
+                    st.plotly_chart(fig_bubble, use_container_width=True)
+                else:
+                    st.info("Chưa có dữ liệu chi tiêu.")
 
-            # --- BƯỚC 7: BẢNG CHI TIẾT ---
             st.markdown("### 📑 Chi tiết dữ liệu")
             st.dataframe(
                 df_filtered.sort_values(by='Date', ascending=False).style.format({
-                    "Cost": "${:,.2f}",
-                    "Revenue": "${:,.2f}",
-                    "CPI": "${:,.3f}",
-                    "ROAS": "{:,.2f}%",
-                    "Installs": "{:,.0f}"
+                    "Cost": "${:,.2f}", "Revenue": "${:,.2f}", "CPI": "${:,.3f}",
+                    "ROAS": "{:,.2f}%", "Installs": "{:,.0f}"
                 }),
                 use_container_width=True
             )
         else:
-            st.info("Vui lòng chọn khoảng thời gian hợp lệ.")
+            st.warning("Không có dữ liệu nào thỏa mãn điều kiện lọc.")
 
     except Exception as e:
-        st.error(f"Vẫn có lỗi xảy ra sếp ơi: {e}")
-        st.info("Sếp thử mở file CSV bằng Excel -> Save As -> Chọn định dạng 'CSV UTF-8 (Comma delimited) (*.csv)' rồi upload lại xem sao nhé!")
+        st.error(f"Lỗi hệ thống: {e}")
+        st.code(str(e)) # Hiện mã lỗi chi tiết để debug nếu cần
 
 else:
     st.info("👈 Sếp vui lòng upload file CSV Cohort bên thanh menu trái nhé!")
-    st.markdown("""
-    ### Hướng dẫn chuẩn bị file CSV:
-    File CSV của sếp cần có tối thiểu các cột sau (tên cột không quan trọng, tool cho phép map lại):
-    1.  **Date:** Ngày phát sinh install.
-    2.  **Country:** Quốc gia.
-    3.  **Cost/Spend:** Số tiền đã chạy ads.
-    4.  **Installs:** Số lượng cài đặt.
-    5.  **Revenue/LTV:** Doanh thu (có thể là D0, D7 hoặc Total LTV tùy mục đích sếp muốn soi).
-    """)
