@@ -6,66 +6,100 @@ import io
 st.set_page_config(page_title="Monetization Data Tool", layout="wide")
 
 st.title("🛠️ Monetization Data Cleaner")
-st.markdown("Tool xử lý file CSV lỗi format, lệch dòng (IronSource, AppLovin, etc.)")
+st.markdown("Tool xử lý file CSV lỗi format, lệch dòng (IronSource, AppLovin, AdMob, etc.)")
 
-# --- HÀM XỬ LÝ LOGIC (Đã tối ưu cho Streamlit) ---
+# --- HÀM XỬ LÝ LOGIC (Đã nâng cấp Auto-Detect Encoding) ---
 def clean_currency(x):
     if isinstance(x, str):
+        # Xóa $, dấu phẩy, khoảng trắng thừa
         return x.replace('$', '').replace(',', '').strip()
     return x
 
-@st.cache_data(ttl=300) # Cache data để tránh reload lại nặng server
+@st.cache_data(ttl=300)
 def process_monetization_report(uploaded_file):
+    # Danh sách các encoding thường gặp trong report Ad Tech
+    encodings_to_try = ['utf-8', 'utf-16', 'utf-8-sig', 'latin-1', 'cp1252']
+    
+    df_temp = None
+    used_encoding = None
+    error_msg = ""
+
+    # 1. Thử đọc file với các encoding khác nhau
+    for encoding in encodings_to_try:
+        try:
+            uploaded_file.seek(0) # Reset con trỏ về đầu file trước mỗi lần thử
+            # Đọc thử 20 dòng để check encoding và tìm header
+            df_temp = pd.read_csv(uploaded_file, header=None, nrows=20, encoding=encoding, sep=None, engine='python')
+            used_encoding = encoding
+            break # Đọc được rồi thì thoát vòng lặp
+        except Exception as e:
+            error_msg = str(e)
+            continue
+
+    if df_temp is None:
+        return None, f"Không đọc được file với các định dạng phổ biến. Lỗi cuối cùng: {error_msg}"
+
     try:
-        # Đọc file buffer
+        # 2. Tìm dòng Header (Logic dò tìm thông minh)
+        header_row_index = 0
+        found = False
+        
+        # Reset file pointer để đọc full file với encoding đã tìm được
         uploaded_file.seek(0)
         
-        # Tìm header (Logic cũ em đã viết)
-        header_row_index = 0
-        df_temp = pd.read_csv(uploaded_file, header=None, nrows=15) # Đọc thử 15 dòng
-        uploaded_file.seek(0)
-
-        found = False
+        # Duyệt qua bảng tạm để tìm keywords
         for idx, row in df_temp.iterrows():
             row_str = row.astype(str).str.lower().tolist()
-            # Tìm keywords đặc trưng
-            if any(k in str(s) for s in row_str for k in ['country', 'installs', 'date']):
+            # Tìm keywords đặc trưng của report (Date, Country, Impressions, Est. Earnings...)
+            keywords = ['date', 'country', 'ad unit', 'application', 'impressions', 'estimated earnings', 'requests']
+            if any(k in str(s) for s in row_str for k in keywords):
                 header_row_index = idx
                 found = True
                 break
         
-        # Đọc lại với header đúng
-        df = pd.read_csv(uploaded_file, header=header_row_index)
+        # 3. Đọc lại toàn bộ file với header đúng
+        # Lưu ý: sep=None và engine='python' giúp tự động nhận diện dấu phẩy hoặc tab
+        df = pd.read_csv(uploaded_file, header=header_row_index, encoding=used_encoding, sep=None, engine='python')
         
-        # Chuẩn hóa cột
-        df.columns = df.columns.str.strip()
+        # 4. Chuẩn hóa dữ liệu
+        df.columns = df.columns.str.strip() # Xóa khoảng trắng ở tên cột
         
-        # Xử lý Date
-        if 'Date' in df.columns:
-            df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-            df = df.dropna(subset=['Date'])
+        # Xử lý cột Date (nếu có)
+        date_cols = [c for c in df.columns if 'date' in c.lower()]
+        if date_cols:
+            col_name = date_cols[0]
+            df[col_name] = pd.to_datetime(df[col_name], errors='coerce')
+            df = df.dropna(subset=[col_name]) # Bỏ dòng tổng cộng hoặc rác ở cuối
 
-        # Xử lý Số
-        numeric_cols = [c for c in df.columns if c not in ['Date', 'Country', 'Campaign', 'Ad Network']]
+        # Xử lý Số (Currency, Number)
+        # Loại trừ các cột text
+        exclude_cols = ['Date', 'Country', 'Campaign', 'Ad Network', 'Ad Unit', 'App', 'Platform']
+        numeric_cols = [c for c in df.columns if not any(ex in c for ex in exclude_cols)]
+        
         for col in numeric_cols:
-            df[col] = df[col].apply(clean_currency)
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+            # Chỉ xử lý nếu cột kiểu object (string)
+            if df[col].dtype == 'object':
+                df[col] = df[col].apply(clean_currency)
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-        return df, header_row_index
+        return df, f"Encoding: {used_encoding} | Header line: {header_row_index}"
 
     except Exception as e:
-        return None, str(e)
+        return None, f"Lỗi xử lý data: {str(e)}"
 
 # --- GIAO DIỆN CHÍNH ---
 
-uploaded_file = st.file_uploader("Upload file CSV report vào đây sếp ơi", type=['csv'])
+uploaded_file = st.file_uploader("Upload file CSV report vào đây sếp ơi", type=['csv', 'txt'])
 
 if uploaded_file is not None:
-    with st.spinner('Đang xử lý dữ liệu...'):
+    with st.spinner('Đang soi encoding và xử lý dữ liệu...'):
         df_result, debug_info = process_monetization_report(uploaded_file)
         
         if df_result is not None:
-            st.success(f"✅ Xử lý thành công! Tìm thấy header tại dòng: {debug_info}")
+            st.success(f"✅ Xử lý thành công! ({debug_info})")
+            
+            # Hiển thị thống kê nhanh
+            st.write(f"📊 **Tổng quan:** {df_result.shape[0]} dòng dữ liệu.")
             
             # Hiển thị data
             st.dataframe(df_result, use_container_width=True)
@@ -82,7 +116,7 @@ if uploaded_file is not None:
                 mime="application/vnd.ms-excel"
             )
         else:
-            st.error(f"❌ Lỗi rồi sếp ơi: {debug_info}")
+            st.error(f"❌ Vẫn lỗi sếp ơi: {debug_info}")
 
 else:
     st.info("👈 Chưa có file nào được upload.")
