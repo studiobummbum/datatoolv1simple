@@ -1,175 +1,203 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import io
 
 # --- CẤU HÌNH TRANG ---
-st.set_page_config(page_title="AdMob Cohort Analyzer Pro", layout="wide")
+st.set_page_config(page_title="LTV Dashboard V4.0", layout="wide")
 
-st.title("💰 AdMob Cohort LTV Analyzer (V3.6 - Stable)")
+# --- CSS TÙY CHỈNH (CHO ĐẸP) ---
 st.markdown("""
 <style>
-    .stAlert { padding: 10px; border-radius: 5px; }
-    .success { background-color: #d4edda; color: #155724; }
+    .stDataFrame {border: 1px solid #e0e0e0; border-radius: 5px;}
+    .metric-card {background-color: #f0f2f6; padding: 15px; border-radius: 10px; text-align: center;}
 </style>
 """, unsafe_allow_html=True)
 
-st.info("💡 Upload file `admob-report.csv`. Hệ thống tự động nhận diện header, encoding và dấu ngăn cách.")
+# --- TIÊU ĐỀ ---
+st.title("🚀 Mobile App LTV Dashboard - V4.0")
+st.markdown("Analyze your monetization performance like a Pro!")
 
-# --- HÀM XỬ LÝ DATA ---
-def load_data(uploaded_file):
-    # Danh sách encoding hay gặp
-    encodings = ['utf-16', 'utf-8', 'latin1', 'cp1252'] 
-    # Danh sách dấu ngăn cách hay gặp (Tab hoặc Phẩy)
-    separators = ['\t', ','] 
-    
-    df = None
-    used_encoding = None
-    used_sep = None
-    header_row = 0
-    
-    # Logic dò tìm "trâu bò": Thử combo (Encoding + Separator + Skiprows)
-    possible_skiprows = [0, 1, 2] 
-    
-    for enc in encodings:
-        for sep in separators:
-            for skip in possible_skiprows:
-                try:
-                    uploaded_file.seek(0)
-                    # Đọc thử vài dòng để check
-                    temp_df = pd.read_csv(uploaded_file, skiprows=skip, encoding=enc, sep=sep, on_bad_lines='skip', nrows=10)
-                    
-                    # Nếu đọc ra mà chỉ có 1 cột thì khả năng cao là sai separator -> Bỏ qua
-                    if len(temp_df.columns) < 2:
-                        continue
-
-                    # Check xem tên cột có chứa từ khóa quan trọng không
-                    col_str = " ".join([str(c).lower() for c in temp_df.columns])
-                    if ('date' in col_str or 'ngày' in col_str) and ('country' in col_str or 'install' in col_str):
-                        # Nếu OK thì đọc full file
-                        uploaded_file.seek(0)
-                        df = pd.read_csv(uploaded_file, skiprows=skip, encoding=enc, sep=sep, on_bad_lines='skip')
-                        used_encoding = enc
-                        used_sep = sep
-                        header_row = skip
-                        break
-                except:
-                    continue
-            if df is not None: break
-        if df is not None: break
-            
-    return df, used_encoding, used_sep, header_row
-
-# --- UI CHÍNH ---
-uploaded_file = st.file_uploader("📂 Kéo thả file CSV vào đây sếp ơi", type=['csv', 'txt'])
-
-if uploaded_file is not None:
-    with st.spinner('Đang soi data của sếp...'):
-        df, encoding, sep, header_row = load_data(uploaded_file)
-
-    if df is None:
-        st.error("❌ Em chịu thua! Không đọc được file. Sếp check lại xem có phải CSV chuẩn không?")
-        st.stop()
-
-    # --- XỬ LÝ TÊN CỘT (MAPPING) ---
-    df.columns = df.columns.astype(str).str.strip()
-    
-    mapping_rules = {
-        'Date': ['install date', 'date', 'ngày'],
-        'Country': ['install country', 'country', 'quốc gia', 'region'],
-        'Day': ['days since install', 'day', 'ngày kể từ'],
-        'LTV': ['ltv (usd)', 'ltv', 'revenue', 'doanh thu'],
-        'Installs': ['installs', 'lượt cài đặt', 'cài đặt']
-    }
-
-    final_rename_map = {}
-    found_cols = []
-
-    for target_name, keywords in mapping_rules.items():
-        match_col = None
-        for col in df.columns:
-            col_lower = col.lower()
-            if any(kw in col_lower for kw in keywords):
-                if target_name == 'Installs' and ('date' in col_lower or 'day' in col_lower or 'country' in col_lower or 'ltv' in col_lower):
-                    continue
-                if target_name == 'LTV' and ('iap' in col_lower or 'ads' in col_lower or 'sub' in col_lower):
-                    continue     
-                match_col = col
-                break
-        
-        if match_col:
-            final_rename_map[match_col] = target_name
-            found_cols.append(target_name)
-
-    # --- DEBUG INFO ---
-    with st.expander("🕵️‍♂️ Debug: Thông số file"):
-        st.write(f"**Encoding:** `{encoding}` | **Separator:** `{repr(sep)}`")
-        st.write("**Mapping:**", final_rename_map)
-
-    required_cols = ['Date', 'Day', 'LTV']
-    missing = [col for col in required_cols if col not in found_cols]
-    
-    if missing:
-        st.error(f"❌ Toang rồi sếp ơi! Em không tìm thấy cột: {', '.join(missing)}.")
-        st.stop()
-
-    # --- ÁP DỤNG RENAME & CLEAN ---
-    df = df.rename(columns=final_rename_map)
-
+# --- HÀM XỬ LÝ DỮ LIỆU (CORE LOGIC) ---
+@st.cache_data
+def process_data(df):
     try:
-        df['Date'] = pd.to_datetime(df['Date'], errors='coerce').dt.date
-        df = df.dropna(subset=['Date'])
+        # 1. Chuẩn hóa tên cột (xóa khoảng trắng thừa, về chữ thường)
+        df.columns = df.columns.str.strip().str.lower()
+        
+        # 2. Map tên cột từ file CSV sang tên chuẩn của code
+        # Sếp có thể thêm các biến thể tên cột vào đây nếu file CSV thay đổi
+        col_mapping = {
+            'date': 'date',
+            'country': 'country',
+            'installs': 'installs',
+            'd0 ad revenue': 'd0_rev', 'd0 revenue': 'd0_rev',
+            'd1 ad revenue': 'd1_rev', 'd1 revenue': 'd1_rev',
+            'd3 ad revenue': 'd3_rev', 'd3 revenue': 'd3_rev',
+            # Nếu sếp muốn thêm D7, D14 sau này thì thêm vào đây
+        }
+        
+        df = df.rename(columns=col_mapping)
+        
+        # 3. Kiểm tra các cột bắt buộc
+        required_cols = ['date', 'country', 'installs', 'd0_rev', 'd1_rev', 'd3_rev']
+        missing_cols = [c for c in required_cols if c not in df.columns]
+        
+        if missing_cols:
+            return None, f"Thiếu cột trong file CSV: {', '.join(missing_cols)}"
 
-        cols_to_numeric = ['LTV']
-        if 'Installs' in df.columns:
-            cols_to_numeric.append('Installs')
+        # 4. Xử lý dữ liệu
+        df['date'] = pd.to_datetime(df['date'])
         
-        for col in cols_to_numeric:
-            if df[col].dtype == object:
-                df[col] = df[col].astype(str).str.replace(r'[$,₫a-zA-Z()]', '', regex=True)
+        # Chuyển đổi số liệu sang numeric (xử lý lỗi nếu có ký tự lạ)
+        numeric_cols = ['installs', 'd0_rev', 'd1_rev', 'd3_rev']
+        for col in numeric_cols:
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+
+        # 5. Tính toán LTV (Revenue / Installs)
+        # Tránh chia cho 0
+        df['ltv_d0'] = np.where(df['installs'] > 0, df['d0_rev'] / df['installs'], 0)
+        df['ltv_d1'] = np.where(df['installs'] > 0, (df['d0_rev'] + df['d1_rev']) / df['installs'], 0)
+        df['ltv_d3'] = np.where(df['installs'] > 0, (df['d0_rev'] + df['d1_rev'] + df['d3_rev']) / df['installs'], 0)
+
+        # Sắp xếp
+        df = df.sort_values(by='date', ascending=False)
         
-        if 'Installs' not in df.columns:
-            df['Installs'] = 1 
+        return df, None
+        
+    except Exception as e:
+        return None, f"Lỗi xử lý dữ liệu: {str(e)}"
+
+# --- SIDEBAR: UPLOAD & CONTROLS ---
+with st.sidebar:
+    st.header("📂 Data Input")
+    
+    # Nút Clear Cache
+    if st.button("🗑️ Xóa Cache & Reset Data", type="primary"):
+        st.cache_data.clear()
+        if 'uploaded_file' in st.session_state:
+            del st.session_state['uploaded_file']
+        st.rerun()
+
+    uploaded_file = st.file_uploader("Upload CSV Report", type=['csv'])
+
+    st.markdown("---")
+    st.header("⚙️ Hiển thị")
+
+# --- MAIN APP ---
+if uploaded_file is not None:
+    # Đọc file
+    try:
+        df_raw = pd.read_csv(uploaded_file)
+        df_processed, error_msg = process_data(df_raw)
+
+        if error_msg:
+            st.error(f"❌ {error_msg}")
+        else:
+            # --- BỘ LỌC (FILTERS) ---
+            st.subheader("🔍 Bộ lọc dữ liệu")
+            col_f1, col_f2 = st.columns(2)
+            
+            with col_f1:
+                # Lọc Country
+                all_countries = ['All'] + sorted(df_processed['country'].unique().tolist())
+                selected_country = st.selectbox("Chọn Quốc gia:", all_countries)
+            
+            with col_f2:
+                # Lọc Date Range
+                min_date = df_processed['date'].min()
+                max_date = df_processed['date'].max()
+                date_range = st.date_input(
+                    "Chọn khoảng thời gian:",
+                    value=(min_date, max_date),
+                    min_value=min_date,
+                    max_value=max_date
+                )
+
+            # Áp dụng bộ lọc
+            df_view = df_processed.copy()
+            
+            if selected_country != 'All':
+                df_view = df_view[df_view['country'] == selected_country]
+            
+            if len(date_range) == 2:
+                start_date, end_date = date_range
+                df_view = df_view[(df_view['date'].dt.date >= start_date) & (df_view['date'].dt.date <= end_date)]
+
+            # --- TÙY CHỌN CỘT HIỂN THỊ (TOGGLE COLUMNS) ---
+            with st.sidebar:
+                st.subheader("👁️ Chọn cột hiển thị")
+                
+                # Mặc định các cột này luôn hiện
+                default_cols = ['date', 'country', 'installs']
+                
+                # Các cột có thể bật tắt
+                toggle_options = {
+                    'LTV D0': 'ltv_d0',
+                    'LTV D1': 'ltv_d1',
+                    'LTV D3': 'ltv_d3',
+                    'Revenue D0': 'd0_rev', # Thêm option xem doanh thu gốc nếu cần
+                    'Revenue D1': 'd1_rev',
+                    'Revenue D3': 'd3_rev'
+                }
+                
+                selected_metrics = []
+                # Mặc định tích chọn LTV D0, D1, D3
+                if st.checkbox("LTV D0", value=True): selected_metrics.append('ltv_d0')
+                if st.checkbox("LTV D1", value=True): selected_metrics.append('ltv_d1')
+                if st.checkbox("LTV D3", value=True): selected_metrics.append('ltv_d3')
+                
+                st.markdown("---")
+                st.caption("Raw Revenue Metrics:")
+                if st.checkbox("Rev D0", value=False): selected_metrics.append('d0_rev')
+                if st.checkbox("Rev D1", value=False): selected_metrics.append('d1_rev')
+                if st.checkbox("Rev D3", value=False): selected_metrics.append('d3_rev')
+
+            # --- HIỂN THỊ BẢNG ---
+            st.success(f"✅ Đã tải xong! Hiển thị {len(df_view)} dòng dữ liệu.")
+            
+            # Chuẩn bị cột cuối cùng để hiển thị
+            final_cols = default_cols + selected_metrics
+            
+            # Format hiển thị cho đẹp ($ và 4 số thập phân)
+            column_config = {
+                "date": st.column_config.DateColumn("Date", format="YYYY-MM-DD"),
+                "country": "Country",
+                "installs": st.column_config.NumberColumn("Installs", format="%d"),
+                "ltv_d0": st.column_config.NumberColumn("LTV D0", format="$%.4f"),
+                "ltv_d1": st.column_config.NumberColumn("LTV D1", format="$%.4f"),
+                "ltv_d3": st.column_config.NumberColumn("LTV D3", format="$%.4f"),
+                "d0_rev": st.column_config.NumberColumn("Rev D0", format="$%.2f"),
+                "d1_rev": st.column_config.NumberColumn("Rev D1", format="$%.2f"),
+                "d3_rev": st.column_config.NumberColumn("Rev D3", format="$%.2f"),
+            }
+
+            st.dataframe(
+                df_view[final_cols],
+                use_container_width=True,
+                column_config=column_config,
+                hide_index=True
+            )
+            
+            # --- DEBUG INFO (Ẩn trong expander cho gọn) ---
+            with st.expander("🛠️ Debug: Thông số file raw"):
+                st.write(df_raw.head())
+                st.write(df_raw.dtypes)
 
     except Exception as e:
-        st.error(f"❌ Lỗi khi clean data: {e}")
-        st.stop()
-
-    # --- PIVOT TABLE ---
-    target_days = [0, 1, 3, 7, 14, 28, 30, 60]
-    df_filtered = df[df['Day'].isin(target_days)].copy()
-
-    if 'Country' not in df.columns:
-        df_filtered['Country'] = 'Global'
-
-    df_installs = df[df['Day'] == 0][['Date', 'Country', 'Installs']].drop_duplicates()
-    df_installs = df_installs.groupby(['Date', 'Country'], as_index=False)['Installs'].sum()
+        st.error(f"Lỗi đọc file: {e}")
+else:
+    # Màn hình chờ
+    st.info("👈 Sếp ơi, upload file CSV bên trái để bắt đầu soi LTV nhé!")
     
-    df_ltv = df_filtered.pivot_table(
-        index=['Date', 'Country'],
-        columns='Day',
-        values='LTV',
-        aggfunc='sum'
-    ).reset_index()
-    
-    final_df = pd.merge(df_installs, df_ltv, on=['Date', 'Country'], how='left')
-    
-    new_cols = {d: f'LTV D{d}' for d in target_days if d in final_df.columns}
-    final_df = final_df.rename(columns=new_cols)
-    final_df = final_df.fillna(0)
-    final_df = final_df.sort_values(by='Date', ascending=False)
-
-    # --- HIỂN THỊ KẾT QUẢ ---
-    st.success("✅ Ngon lành rồi sếp ơi!")
-    
-    format_config = {'Installs': '{:,.0f}'}
-    ltv_cols = [c for c in final_df.columns if 'LTV' in c]
-    for c in ltv_cols:
-        format_config[c] = '${:.4f}'
-
-    # Fix lỗi: Bỏ background_gradient để không cần matplotlib
-    st.dataframe(
-        final_df.style.format(format_config),
-        use_container_width=True,
-        height=600
-    )
+    # Hướng dẫn format file
+    with st.expander("ℹ️ Hướng dẫn format file CSV chuẩn"):
+        st.markdown("""
+        File CSV cần có các cột sau (tên không phân biệt hoa thường):
+        - **Date**: Ngày tháng
+        - **Country**: Quốc gia
+        - **Installs**: Số lượng cài đặt
+        - **D0 Revenue**: Doanh thu ngày 0
+        - **D1 Revenue**: Doanh thu ngày 1
+        - **D3 Revenue**: Doanh thu ngày 3
+        """)
