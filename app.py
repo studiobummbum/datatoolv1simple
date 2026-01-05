@@ -5,7 +5,7 @@ import numpy as np
 
 # --- CẤU HÌNH TRANG ---
 st.set_page_config(
-    page_title="Monetization Report V3.0 (No Cost Support)",
+    page_title="Monetization Report V3.1 (Stable)",
     page_icon="💰",
     layout="wide"
 )
@@ -24,8 +24,8 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- HEADER ---
-st.title("💰 Monetization & LTV Report V3.0")
-st.markdown("**Update:** Hỗ trợ file không có cột Cost (AdMob/Mediation Reports).")
+st.title("💰 Monetization & LTV Report V3.1")
+st.markdown("**Trạng thái:** Đã fix lỗi xử lý dữ liệu & hỗ trợ file không có Cost.")
 st.markdown("---")
 
 # --- BƯỚC 1: UPLOAD FILE ---
@@ -63,9 +63,7 @@ if uploaded_file:
         col_revenue_raw = st.sidebar.selectbox("Cột Doanh thu (LTV/Revenue):", all_columns, index=get_index(all_columns, ['ltv', 'revenue', 'value', 'earnings']))
 
         # Mapping tùy chọn (Cost)
-        # Thêm option "Không có" vào đầu list
         cost_options = ["🚫 Không có (No Cost Data)"] + all_columns
-        # Cố gắng tìm cột cost, nếu không thấy thì default về 0 (Option "Không có")
         default_cost_idx = 0
         for i, opt in enumerate(cost_options):
             if any(k in str(opt).lower() for k in ['cost', 'spend', 'amount']) and opt != "🚫 Không có (No Cost Data)":
@@ -74,69 +72,52 @@ if uploaded_file:
         
         col_cost_raw = st.sidebar.selectbox("Cột Chi phí (Cost/Spend) - Optional:", cost_options, index=default_cost_idx)
 
-        # --- BƯỚC 3: XỬ LÝ DATA ---
-        # Logic: Chỉ lấy cột cần thiết -> Rename -> Xử lý type
+        # --- BƯỚC 3: XỬ LÝ DATA (FIXED) ---
         
-        # 1. Xác định cột cần lấy
-        cols_to_keep = [col_date_raw, col_country_raw, col_installs_raw, col_revenue_raw]
+        # 1. Tạo DataFrame sạch
+        df_clean = pd.DataFrame()
+        df_clean['Date'] = df[col_date_raw]
+        df_clean['Country'] = df[col_country_raw]
+        df_clean['Installs'] = df[col_installs_raw]
+        df_clean['Revenue'] = df[col_revenue_raw]
+
         has_cost = col_cost_raw != "🚫 Không có (No Cost Data)"
-        
         if has_cost:
-            cols_to_keep.append(col_cost_raw)
-
-        df_clean = df[cols_to_keep].copy()
-
-        # 2. Rename
-        rename_map = {
-            col_date_raw: 'Date',
-            col_country_raw: 'Country',
-            col_installs_raw: 'Installs',
-            col_revenue_raw: 'Revenue'
-        }
-        if has_cost:
-            rename_map[col_cost_raw] = 'Cost'
-        
-        df_clean = df_clean.rename(columns=rename_map)
-
-        # 3. Nếu không có cột Cost, tạo cột Cost toàn số 0
-        if not has_cost:
+            df_clean['Cost'] = df[col_cost_raw]
+        else:
             df_clean['Cost'] = 0.0
 
-        # 4. Clean Data Types
-        df_clean['Date'] = pd.to_datetime(df_clean['Date'], errors='coerce')
-        
-        for col in ['Installs', 'Revenue', 'Cost']:
-            df_clean[col] = pd.to_numeric(
-                df_clean[col].astype(str).str.replace(r'[$,]', '', regex=True), 
-                errors='coerce'
-            ).fillna(0)
+        # 2. Clean Data Types (Hàm xử lý an toàn)
+        def clean_currency(x):
+            if isinstance(x, (int, float)):
+                return x
+            if isinstance(x, str):
+                # Xóa ký tự lạ, chỉ giữ lại số và dấu chấm
+                clean_str = x.replace('$', '').replace(',', '').replace('%', '').strip()
+                try:
+                    return float(clean_str)
+                except ValueError:
+                    return 0.0
+            return 0.0
 
+        # Áp dụng hàm clean
+        df_clean['Installs'] = df_clean['Installs'].apply(clean_currency)
+        df_clean['Revenue'] = df_clean['Revenue'].apply(clean_currency)
+        df_clean['Cost'] = df_clean['Cost'].apply(clean_currency)
+        
+        # Xử lý ngày tháng
+        df_clean['Date'] = pd.to_datetime(df_clean['Date'], errors='coerce')
         df_clean = df_clean.dropna(subset=['Date'])
 
-        # 5. Tính KPI
-        # Vì file AdMob của sếp là dạng Long Format (mỗi ngày 1 dòng), 
-        # LTV trong file sếp gửi là "LTV (USD)" tích lũy theo ngày (Days since install).
-        # Để view tổng quan, ta thường lấy max LTV của cohort hoặc sum revenue (tùy logic file).
-        # Với file này: Cột "LTV (USD)" là giá trị trung bình trên user (Average LTV) hay Tổng Revenue?
-        # Check logic: Nếu cột là "LTV (USD)" thường là per user. Nếu là "Revenue" là tổng.
-        # Dựa vào data sếp gửi: LTV (USD) ~ 0.02 -> Đây là Average LTV per User.
-        # => Total Revenue = Installs * LTV (USD).
-        
-        # Logic tự động phát hiện: Nếu Revenue < 100 và Installs > 100 (ví dụ), khả năng cao cột đó là ARPU/LTV per user.
-        # Nhưng để an toàn, ta giả định cột sếp chọn là Total Revenue. 
-        # NẾU sếp chọn cột "LTV (USD)" thì ta cần nhân với Installs để ra Total Revenue.
-        
-        # SỬA LOGIC CHO FILE ADMOB CỤ THỂ CỦA SẾP:
-        # File sếp: Cột "LTV (USD)" là Average LTV. Cột "Installs" là số install của cohort đó.
-        # Total Revenue thực tế = Installs * LTV (USD) (tại dòng max day).
-        # Tuy nhiên, để đơn giản hóa hiển thị trên Streamlit, ta sẽ tính toán lại.
-        
-        # Ta tạo thêm cột 'Total_Revenue_Real'
-        if "LTV" in col_revenue_raw:
+        # 3. Tính toán lại Revenue nếu cột được chọn là LTV (Logic quan trọng cho AdMob)
+        # Nếu cột được chọn có chữ "LTV" trong tên, ta hiểu đó là giá trị trung bình/user -> Cần nhân với Installs
+        if "ltv" in col_revenue_raw.lower():
              df_clean['Revenue'] = df_clean['Revenue'] * df_clean['Installs']
-        
-        df_clean['CPI'] = np.where(df_clean['Installs'] > 0, df_clean['Cost'] / df_clean['Installs'], 0)
-        df_clean['ROAS'] = np.where(df_clean['Cost'] > 0, (df_clean['Revenue'] / df_clean['Cost']) * 100, 0)
+
+        # 4. Tính KPI phụ
+        # Tránh chia cho 0
+        df_clean['CPI'] = df_clean.apply(lambda row: row['Cost'] / row['Installs'] if row['Installs'] > 0 else 0, axis=1)
+        df_clean['ROAS'] = df_clean.apply(lambda row: (row['Revenue'] / row['Cost'] * 100) if row['Cost'] > 0 else 0, axis=1)
 
         # --- BƯỚC 4: BỘ LỌC ---
         st.header("🔍 Bộ lọc dữ liệu")
@@ -149,7 +130,7 @@ if uploaded_file:
             date_range = st.date_input("Chọn khoảng thời gian:", value=(min_date, max_date))
         
         with col2:
-            unique_countries = ['All'] + sorted(df_clean['Country'].unique().astype(str).tolist())
+            unique_countries = ['All'] + sorted(df_clean['Country'].astype(str).unique().tolist())
             selected_country = st.selectbox("Chọn Quốc gia:", unique_countries)
 
         # Filter Logic
@@ -164,15 +145,12 @@ if uploaded_file:
 
         # --- BƯỚC 5: DASHBOARD ---
         if not df_filtered.empty:
-            # Group data để hiển thị tổng quan (Tránh cộng dồn sai do file dạng cohort daily)
-            # File AdMob dạng: Date - Country - Day 0, Day 1...
-            # Để tính tổng Revenue đúng, ta cần lấy giá trị LTV cao nhất của mỗi Cohort (Date + Country).
-            
             # Group theo Cohort (Date + Country) và lấy Max Revenue (vì LTV tích lũy)
+            # Logic: Với mỗi ngày install và mỗi quốc gia, Revenue cao nhất chính là Revenue tích lũy đến hiện tại
             df_cohort_summary = df_filtered.groupby(['Date', 'Country']).agg({
-                'Installs': 'max', # Số install không đổi theo ngày
-                'Revenue': 'max',  # Lấy LTV tích lũy cao nhất (Total Revenue của cohort)
-                'Cost': 'max'      # Cost (nếu có) cũng là total cho cohort
+                'Installs': 'max', # Số install là hằng số cho cohort đó
+                'Revenue': 'max',  # Lấy giá trị tích lũy lớn nhất
+                'Cost': 'max'      # Cost cũng là hằng số
             }).reset_index()
 
             total_spend = df_cohort_summary['Cost'].sum()
@@ -186,11 +164,12 @@ if uploaded_file:
             cols[1].metric("Tổng Doanh Thu (Est.)", f"${total_revenue:,.2f}")
             
             if has_cost and total_spend > 0:
-                avg_roas = (total_revenue / total_spend * 100)
+                avg_roas = (total_revenue / total_spend * 100) if total_spend > 0 else 0
                 cols[2].metric("Tổng Chi Phí", f"${total_spend:,.2f}")
                 cols[3].metric("ROAS Tổng", f"{avg_roas:,.2f}%")
             else:
-                cols[2].metric("ARPU (Avg Revenue/User)", f"${(total_revenue/total_installs if total_installs else 0):,.3f}")
+                arpu = total_revenue / total_installs if total_installs > 0 else 0
+                cols[2].metric("ARPU (Avg Revenue/User)", f"${arpu:,.3f}")
                 cols[3].metric("Trạng thái Cost", "No Data", delta_color="off")
 
             st.markdown("---")
@@ -217,7 +196,7 @@ if uploaded_file:
             }), use_container_width=True)
 
     except Exception as e:
-        st.error(f"Có lỗi xảy ra: {e}")
-        st.write("Debug Info - Columns:", df.columns.tolist())
+        st.error(f"Vẫn còn lỗi: {e}")
+        st.write("Vui lòng chụp màn hình lỗi này gửi lại để em xử lý.")
 else:
     st.info("👈 Upload file AdMob CSV để bắt đầu phân tích nhé sếp!")
