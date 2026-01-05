@@ -9,31 +9,24 @@ st.set_page_config(page_title="Pro Monetization Analyzer", layout="wide")
 def load_robust_csv(uploaded_file):
     """
     Hàm này chuyên trị các lỗi encoding khó chịu như utf-8 codec can't decode byte 0xff.
-    Nó sẽ thử lần lượt các encoding phổ biến nhất trong ngành Mobile App (Export từ Excel, Ironsource, Max...).
     """
-    # Danh sách các encoding và separator thường gặp
-    # utf-16: Thường gặp khi export CSV từ Excel hoặc một số Ad Network cũ (gây ra lỗi 0xff)
-    # utf-8: Chuẩn web
-    # iso-8859-1: Chuẩn cũ của Windows
     try_encodings = [
-        ('utf-8', ','),          # Chuẩn phổ biến nhất
-        ('utf-16', '\t'),        # Fix lỗi 0xff (thường đi kèm tab separator)
-        ('utf-16', ','),         # Fix lỗi 0xff (nếu dùng phẩy)
-        ('utf-16-le', '\t'),     # Little Endian
-        ('iso-8859-1', ','),     # Fallback cho file hệ thống cũ
-        ('cp1252', ',')          # Windows Western European
+        ('utf-8', ','),          
+        ('utf-16', '\t'),        
+        ('utf-16', ','),         
+        ('utf-16-le', '\t'),     
+        ('iso-8859-1', ','),     
+        ('cp1252', ',')          
     ]
 
     for encoding, sep in try_encodings:
         try:
-            uploaded_file.seek(0) # Reset con trỏ file về đầu trước mỗi lần thử
+            uploaded_file.seek(0) 
             df = pd.read_csv(uploaded_file, encoding=encoding, sep=sep)
-            
-            # Kiểm tra nhanh: Nếu đọc được nhưng chỉ có 1 cột thì khả năng sai separator
             if df.shape[1] > 1:
-                return df, None # Thành công
+                return df, None 
         except Exception:
-            continue # Thử encoding tiếp theo
+            continue 
 
     return None, "Không thể đọc file. Vui lòng đảm bảo file là CSV hoặc Text định dạng chuẩn."
 
@@ -42,13 +35,27 @@ def process_data(df):
     # 1. Chuẩn hóa tên cột: về chữ thường, bỏ khoảng trắng thừa
     df.columns = df.columns.str.strip().str.lower().str.replace(' ', '_')
     
-    # 2. Mapping các tên cột phổ biến từ các nguồn khác nhau về chuẩn chung
-    # Sếp có thể bổ sung thêm mapping nếu file nguồn thay đổi
+    # 2. Mapping các tên cột phổ biến (ĐÃ UPDATE THÊM ADMOB)
     col_mapping = {
-        'day': 'date', 'time': 'date', # Cột ngày tháng
-        'country_code': 'country', 'geo': 'country', # Cột quốc gia
-        'installs': 'installs', 'install': 'installs', # Cột install
-        'revenue': 'revenue', 'estimated_revenue': 'revenue', # Cột doanh thu tổng (nếu có)
+        # Mapping Date
+        'day': 'date', 
+        'time': 'date',
+        'install_date': 'date', # <-- Fix cho AdMob
+        
+        # Mapping Country
+        'country_code': 'country', 
+        'geo': 'country',
+        'install_country': 'country', # <-- Fix cho AdMob
+        
+        # Mapping Installs
+        'installs': 'installs', 
+        'install': 'installs',
+        
+        # Mapping Revenue & LTV (Nếu file có sẵn LTV thì map luôn)
+        'revenue': 'revenue', 
+        'estimated_revenue': 'revenue',
+        'ltv_(usd)': 'ltv_total', # <-- AdMob hay có cột này
+        
         # Các cột Cohort Revenue (ví dụ)
         'r0': 'd0_rev', 'revenue_d0': 'd0_rev',
         'r1': 'd1_rev', 'revenue_d1': 'd1_rev',
@@ -71,22 +78,18 @@ def process_data(df):
         return None, "Lỗi định dạng cột Date. Hãy đảm bảo format ngày tháng chuẩn."
 
     # Fill NaN bằng 0 cho các cột số
-    numeric_cols = ['installs', 'd0_rev', 'd1_rev', 'd3_rev', 'd7_rev']
+    numeric_cols = ['installs', 'd0_rev', 'd1_rev', 'd3_rev', 'd7_rev', 'ltv_total']
     for col in numeric_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
     # 5. Tính toán chỉ số LTV (Key Metrics)
-    # LTV = Revenue / Installs
+    # Nếu file AdMob đã có sẵn cột LTV (ltv_total) thì dùng luôn, không cần chia lại
+    # Còn nếu là file raw doanh thu theo ngày (d0, d1...) thì mới tính toán
+    
     if 'd0_rev' in df.columns:
         df['ltv_d0'] = df['d0_rev'] / df['installs']
-    if 'd1_rev' in df.columns:
-        df['ltv_d1'] = df['d1_rev'] / df['installs']
-    if 'd3_rev' in df.columns:
-        df['ltv_d3'] = df['d3_rev'] / df['installs']
-    if 'd7_rev' in df.columns:
-        df['ltv_d7'] = df['d7_rev'] / df['installs']
-
+    
     # Xử lý chia cho 0 (nếu installs = 0) -> thay bằng 0
     df = df.replace([float('inf'), -float('inf')], 0)
 
@@ -97,7 +100,7 @@ st.title("💰 Mobile App Monetization Analyzer (Pro)")
 st.markdown("---")
 
 # Upload File
-uploaded_file = st.file_uploader("Upload file CSV (Report từ MAX/Ironsource/Excel):", type=['csv', 'txt'])
+uploaded_file = st.file_uploader("Upload file CSV (Report từ MAX/Ironsource/AdMob/Excel):", type=['csv', 'txt'])
 
 if uploaded_file is not None:
     # GỌI HÀM ĐỌC FILE BẤT TỬ
@@ -144,21 +147,27 @@ if uploaded_file is not None:
             st.subheader("📊 Performance Overview")
             total_installs = df_view['installs'].sum()
             
-            # Tính Weighted Average LTV (LTV trung bình có trọng số)
-            avg_ltv_d0 = df_view['d0_rev'].sum() / total_installs if total_installs > 0 else 0
-            avg_ltv_d1 = df_view['d1_rev'].sum() / total_installs if total_installs > 0 and 'd1_rev' in df_view.columns else 0
+            # Tính Weighted Average LTV
+            # Logic: Nếu có cột ltv_total (từ AdMob) thì tính trung bình, nếu có d0_rev thì tính từ revenue
+            avg_ltv = 0
+            if 'ltv_total' in df_view.columns:
+                 # AdMob report thường trả về LTV trung bình sẵn, nhưng để tính tổng quan phải nhân ngược lại install
+                 total_revenue = (df_view['ltv_total'] * df_view['installs']).sum()
+                 avg_ltv = total_revenue / total_installs if total_installs > 0 else 0
+            elif 'd0_rev' in df_view.columns:
+                 avg_ltv = df_view['d0_rev'].sum() / total_installs if total_installs > 0 else 0
             
-            col1, col2, col3 = st.columns(3)
+            col1, col2 = st.columns(2)
             col1.metric("Total Installs", f"{int(total_installs):,}")
-            col2.metric("Avg LTV D0", f"${avg_ltv_d0:.4f}")
-            col3.metric("Avg LTV D1", f"${avg_ltv_d1:.4f}")
+            col2.metric("Avg LTV (Est.)", f"${avg_ltv:.4f}")
 
             # 3. Hiển thị Bảng dữ liệu chi tiết
             st.subheader("📋 Detailed Data")
             
             # Chọn cột để hiển thị cho gọn
-            default_cols = ['date', 'country', 'installs', 'ltv_d0']
-            optional_cols = ['ltv_d1', 'ltv_d3', 'ltv_d7', 'd0_rev', 'd1_rev']
+            default_cols = ['date', 'country', 'installs']
+            # Tự động lấy thêm các cột LTV hoặc Revenue nếu có
+            optional_cols = ['ltv_total', 'ltv_d0', 'd0_rev', 'retention']
             available_cols = [c for c in optional_cols if c in df_view.columns]
             
             final_cols = default_cols + available_cols
@@ -167,10 +176,8 @@ if uploaded_file is not None:
             column_config = {
                 "date": st.column_config.DateColumn("Date", format="YYYY-MM-DD"),
                 "installs": st.column_config.NumberColumn("Installs", format="%d"),
+                "ltv_total": st.column_config.NumberColumn("LTV (Total)", format="$%.4f"),
                 "ltv_d0": st.column_config.NumberColumn("LTV D0", format="$%.4f"),
-                "ltv_d1": st.column_config.NumberColumn("LTV D1", format="$%.4f"),
-                "ltv_d3": st.column_config.NumberColumn("LTV D3", format="$%.4f"),
-                "ltv_d7": st.column_config.NumberColumn("LTV D7", format="$%.4f"),
             }
 
             st.dataframe(
