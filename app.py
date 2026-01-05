@@ -5,8 +5,8 @@ import numpy as np
 
 # --- CẤU HÌNH TRANG ---
 st.set_page_config(
-    page_title="UA Report Mapper V2.3 (Fix KeyError)",
-    page_icon="🎯",
+    page_title="Monetization Report V3.0 (No Cost Support)",
+    page_icon="💰",
     layout="wide"
 )
 
@@ -20,25 +20,21 @@ st.markdown("""
         text-align: center;
         box-shadow: 2px 2px 5px rgba(0,0,0,0.1);
     }
-    .stDataFrame {
-        border: 1px solid #ddd;
-        border-radius: 5px;
-    }
 </style>
 """, unsafe_allow_html=True)
 
 # --- HEADER ---
-st.title("🎯 UA Report Mapper V2.3")
-st.markdown("**Logic mới:** Fix lỗi mất cột 'Cost' và chuẩn hóa quy trình xử lý dữ liệu.")
+st.title("💰 Monetization & LTV Report V3.0")
+st.markdown("**Update:** Hỗ trợ file không có cột Cost (AdMob/Mediation Reports).")
 st.markdown("---")
 
 # --- BƯỚC 1: UPLOAD FILE ---
 st.sidebar.header("📂 1. Upload Data")
-uploaded_file = st.sidebar.file_uploader("Chọn file CSV Cohort của sếp", type=["csv"])
+uploaded_file = st.sidebar.file_uploader("Chọn file CSV Cohort (AdMob/MMP)", type=["csv"])
 
 if uploaded_file:
     try:
-        # --- FIX LỖI ENCODING ---
+        # --- LOAD DATA ---
         try:
             df = pd.read_csv(uploaded_file, encoding='utf-8')
         except UnicodeDecodeError:
@@ -50,9 +46,6 @@ if uploaded_file:
 
         st.sidebar.success(f"Đã load: {uploaded_file.name}")
         
-        with st.expander("👀 Xem trước dữ liệu thô (5 dòng đầu)"):
-            st.dataframe(df.head())
-
         # --- BƯỚC 2: MAPPING CỘT ---
         st.sidebar.header("⚙️ 2. Mapping Cột")
         all_columns = df.columns.tolist()
@@ -63,150 +56,168 @@ if uploaded_file:
                     return i
             return 0
 
-        # Người dùng chọn cột từ file gốc
-        col_date_raw = st.sidebar.selectbox("Cột Ngày (Date):", all_columns, index=get_index(all_columns, ['date', 'day', 'time']))
+        # Mapping bắt buộc
+        col_date_raw = st.sidebar.selectbox("Cột Ngày (Install Date):", all_columns, index=get_index(all_columns, ['date', 'day', 'time']))
         col_country_raw = st.sidebar.selectbox("Cột Quốc gia (Country):", all_columns, index=get_index(all_columns, ['country', 'geo', 'region']))
-        col_cost_raw = st.sidebar.selectbox("Cột Chi phí (Cost/Spend):", all_columns, index=get_index(all_columns, ['cost', 'spend', 'amount']))
         col_installs_raw = st.sidebar.selectbox("Cột Installs:", all_columns, index=get_index(all_columns, ['install', 'download']))
-        col_revenue_raw = st.sidebar.selectbox("Cột Doanh thu (LTV/Revenue):", all_columns, index=get_index(all_columns, ['revenue', 'ltv', 'earnings', 'value']))
+        col_revenue_raw = st.sidebar.selectbox("Cột Doanh thu (LTV/Revenue):", all_columns, index=get_index(all_columns, ['ltv', 'revenue', 'value', 'earnings']))
 
-        # --- BƯỚC 3: XỬ LÝ DATA (LOGIC ĐÃ SỬA) ---
-        df_clean = df.copy()
-
-        # 1. Đổi tên cột NGAY LẬP TỨC về chuẩn chung để tránh lỗi KeyError
-        # Chỉ giữ lại các cột cần thiết để tránh rác
-        df_clean = df_clean[[col_date_raw, col_country_raw, col_cost_raw, col_installs_raw, col_revenue_raw]].copy()
+        # Mapping tùy chọn (Cost)
+        # Thêm option "Không có" vào đầu list
+        cost_options = ["🚫 Không có (No Cost Data)"] + all_columns
+        # Cố gắng tìm cột cost, nếu không thấy thì default về 0 (Option "Không có")
+        default_cost_idx = 0
+        for i, opt in enumerate(cost_options):
+            if any(k in str(opt).lower() for k in ['cost', 'spend', 'amount']) and opt != "🚫 Không có (No Cost Data)":
+                default_cost_idx = i
+                break
         
-        df_clean = df_clean.rename(columns={
+        col_cost_raw = st.sidebar.selectbox("Cột Chi phí (Cost/Spend) - Optional:", cost_options, index=default_cost_idx)
+
+        # --- BƯỚC 3: XỬ LÝ DATA ---
+        # Logic: Chỉ lấy cột cần thiết -> Rename -> Xử lý type
+        
+        # 1. Xác định cột cần lấy
+        cols_to_keep = [col_date_raw, col_country_raw, col_installs_raw, col_revenue_raw]
+        has_cost = col_cost_raw != "🚫 Không có (No Cost Data)"
+        
+        if has_cost:
+            cols_to_keep.append(col_cost_raw)
+
+        df_clean = df[cols_to_keep].copy()
+
+        # 2. Rename
+        rename_map = {
             col_date_raw: 'Date',
             col_country_raw: 'Country',
-            col_cost_raw: 'Cost',
             col_installs_raw: 'Installs',
             col_revenue_raw: 'Revenue'
-        })
+        }
+        if has_cost:
+            rename_map[col_cost_raw] = 'Cost'
         
-        # 2. Xử lý ngày tháng trên cột chuẩn 'Date'
+        df_clean = df_clean.rename(columns=rename_map)
+
+        # 3. Nếu không có cột Cost, tạo cột Cost toàn số 0
+        if not has_cost:
+            df_clean['Cost'] = 0.0
+
+        # 4. Clean Data Types
         df_clean['Date'] = pd.to_datetime(df_clean['Date'], errors='coerce')
         
-        # 3. Xử lý số liệu trên các cột chuẩn 'Cost', 'Installs', 'Revenue'
-        for col in ['Cost', 'Installs', 'Revenue']:
-            # Chuyển về string, xóa ký tự lạ ($, dấu phẩy), rồi chuyển về số
+        for col in ['Installs', 'Revenue', 'Cost']:
             df_clean[col] = pd.to_numeric(
                 df_clean[col].astype(str).str.replace(r'[$,]', '', regex=True), 
                 errors='coerce'
             ).fillna(0)
 
-        # 4. Xóa dòng lỗi Date (NaT)
         df_clean = df_clean.dropna(subset=['Date'])
 
-        # 5. Tính KPI (Lúc này chắc chắn đã có cột Cost, Installs, Revenue)
+        # 5. Tính KPI
+        # Vì file AdMob của sếp là dạng Long Format (mỗi ngày 1 dòng), 
+        # LTV trong file sếp gửi là "LTV (USD)" tích lũy theo ngày (Days since install).
+        # Để view tổng quan, ta thường lấy max LTV của cohort hoặc sum revenue (tùy logic file).
+        # Với file này: Cột "LTV (USD)" là giá trị trung bình trên user (Average LTV) hay Tổng Revenue?
+        # Check logic: Nếu cột là "LTV (USD)" thường là per user. Nếu là "Revenue" là tổng.
+        # Dựa vào data sếp gửi: LTV (USD) ~ 0.02 -> Đây là Average LTV per User.
+        # => Total Revenue = Installs * LTV (USD).
+        
+        # Logic tự động phát hiện: Nếu Revenue < 100 và Installs > 100 (ví dụ), khả năng cao cột đó là ARPU/LTV per user.
+        # Nhưng để an toàn, ta giả định cột sếp chọn là Total Revenue. 
+        # NẾU sếp chọn cột "LTV (USD)" thì ta cần nhân với Installs để ra Total Revenue.
+        
+        # SỬA LOGIC CHO FILE ADMOB CỤ THỂ CỦA SẾP:
+        # File sếp: Cột "LTV (USD)" là Average LTV. Cột "Installs" là số install của cohort đó.
+        # Total Revenue thực tế = Installs * LTV (USD) (tại dòng max day).
+        # Tuy nhiên, để đơn giản hóa hiển thị trên Streamlit, ta sẽ tính toán lại.
+        
+        # Ta tạo thêm cột 'Total_Revenue_Real'
+        if "LTV" in col_revenue_raw:
+             df_clean['Revenue'] = df_clean['Revenue'] * df_clean['Installs']
+        
         df_clean['CPI'] = np.where(df_clean['Installs'] > 0, df_clean['Cost'] / df_clean['Installs'], 0)
         df_clean['ROAS'] = np.where(df_clean['Cost'] > 0, (df_clean['Revenue'] / df_clean['Cost']) * 100, 0)
-        
+
         # --- BƯỚC 4: BỘ LỌC ---
         st.header("🔍 Bộ lọc dữ liệu")
-        
-        if df_clean.empty:
-            st.error("Dữ liệu sau khi xử lý bị rỗng. Vui lòng kiểm tra lại file CSV.")
-            st.stop()
-
         col1, col2 = st.columns(2)
         
         min_date = df_clean['Date'].min().date()
         max_date = df_clean['Date'].max().date()
 
         with col1:
-            date_range = st.date_input(
-                "Chọn khoảng thời gian:", 
-                value=(min_date, max_date),
-                min_value=min_date,
-                max_value=max_date
-            )
+            date_range = st.date_input("Chọn khoảng thời gian:", value=(min_date, max_date))
         
         with col2:
             unique_countries = ['All'] + sorted(df_clean['Country'].unique().astype(str).tolist())
             selected_country = st.selectbox("Chọn Quốc gia:", unique_countries)
 
-        # Logic lọc
+        # Filter Logic
         if isinstance(date_range, tuple) and len(date_range) == 2:
             start_date, end_date = date_range
             mask = (df_clean['Date'].dt.date >= start_date) & (df_clean['Date'].dt.date <= end_date)
-            
             if selected_country != 'All':
                 mask = mask & (df_clean['Country'] == selected_country)
-            
             df_filtered = df_clean[mask]
         else:
             df_filtered = df_clean
 
-        # --- BƯỚC 5: HIỂN THỊ DASHBOARD ---
+        # --- BƯỚC 5: DASHBOARD ---
         if not df_filtered.empty:
-            st.markdown("### 📊 Tổng quan hiệu suất")
+            # Group data để hiển thị tổng quan (Tránh cộng dồn sai do file dạng cohort daily)
+            # File AdMob dạng: Date - Country - Day 0, Day 1...
+            # Để tính tổng Revenue đúng, ta cần lấy giá trị LTV cao nhất của mỗi Cohort (Date + Country).
             
-            total_spend = df_filtered['Cost'].sum()
-            total_installs = df_filtered['Installs'].sum()
-            total_revenue = df_filtered['Revenue'].sum()
-            
-            avg_cpi = total_spend / total_installs if total_installs > 0 else 0
-            avg_roas = (total_revenue / total_spend * 100) if total_spend > 0 else 0
+            # Group theo Cohort (Date + Country) và lấy Max Revenue (vì LTV tích lũy)
+            df_cohort_summary = df_filtered.groupby(['Date', 'Country']).agg({
+                'Installs': 'max', # Số install không đổi theo ngày
+                'Revenue': 'max',  # Lấy LTV tích lũy cao nhất (Total Revenue của cohort)
+                'Cost': 'max'      # Cost (nếu có) cũng là total cho cohort
+            }).reset_index()
 
-            m1, m2, m3, m4, m5 = st.columns(5)
-            m1.metric("Tổng Chi Phí", f"${total_spend:,.2f}")
-            m2.metric("Tổng Installs", f"{total_installs:,.0f}")
-            m3.metric("CPI", f"${avg_cpi:,.3f}", delta_color="inverse")
-            m4.metric("Doanh Thu", f"${total_revenue:,.2f}")
-            m5.metric("ROAS", f"{avg_roas:,.2f}%", delta=f"{avg_roas-100:.2f}%" if avg_roas > 0 else None)
+            total_spend = df_cohort_summary['Cost'].sum()
+            total_installs = df_cohort_summary['Installs'].sum()
+            total_revenue = df_cohort_summary['Revenue'].sum()
+            
+            # Metrics
+            st.markdown("### 📊 Hiệu suất Monetization")
+            cols = st.columns(4)
+            cols[0].metric("Tổng Installs", f"{total_installs:,.0f}")
+            cols[1].metric("Tổng Doanh Thu (Est.)", f"${total_revenue:,.2f}")
+            
+            if has_cost and total_spend > 0:
+                avg_roas = (total_revenue / total_spend * 100)
+                cols[2].metric("Tổng Chi Phí", f"${total_spend:,.2f}")
+                cols[3].metric("ROAS Tổng", f"{avg_roas:,.2f}%")
+            else:
+                cols[2].metric("ARPU (Avg Revenue/User)", f"${(total_revenue/total_installs if total_installs else 0):,.3f}")
+                cols[3].metric("Trạng thái Cost", "No Data", delta_color="off")
 
             st.markdown("---")
+            
+            # Charts
             c1, c2 = st.columns(2)
-
+            
             with c1:
-                st.subheader("💸 Xu hướng Spend vs Revenue")
-                # Group by Date
-                daily_stats = df_filtered.groupby('Date')[['Cost', 'Revenue']].sum().reset_index()
-                if not daily_stats.empty:
-                    fig_trend = px.line(daily_stats, x='Date', y=['Cost', 'Revenue'], 
-                                        color_discrete_map={"Cost": "#ef553b", "Revenue": "#00cc96"},
-                                        markers=True)
-                    st.plotly_chart(fig_trend, use_container_width=True)
+                st.subheader("📈 Xu hướng Doanh thu (Cohort Date)")
+                daily_trend = df_cohort_summary.groupby('Date')['Revenue'].sum().reset_index()
+                fig_rev = px.bar(daily_trend, x='Date', y='Revenue', title="Revenue by Install Date", color_discrete_sequence=['#00cc96'])
+                st.plotly_chart(fig_rev, use_container_width=True)
 
             with c2:
-                st.subheader("🌍 Top Quốc gia (Spend)")
-                # Group by Country
-                country_stats = df_filtered.groupby('Country').agg({
-                    'Cost': 'sum', 'Installs': 'sum', 'Revenue': 'sum'
-                }).reset_index()
-                
-                country_stats['CPI'] = np.where(country_stats['Installs']>0, country_stats['Cost']/country_stats['Installs'], 0)
-                country_stats['ROAS'] = np.where(country_stats['Cost']>0, (country_stats['Revenue']/country_stats['Cost'])*100, 0)
-                
-                country_stats = country_stats.sort_values('Cost', ascending=False).head(20)
-                country_stats = country_stats[country_stats['Cost'] > 0]
+                st.subheader("🌍 Top Quốc gia (Revenue)")
+                country_trend = df_cohort_summary.groupby('Country')['Revenue'].sum().reset_index().sort_values('Revenue', ascending=False).head(10)
+                fig_country = px.pie(country_trend, values='Revenue', names='Country', hole=0.4)
+                st.plotly_chart(fig_country, use_container_width=True)
 
-                if not country_stats.empty:
-                    fig_bubble = px.scatter(country_stats, x="CPI", y="ROAS",
-                                            size="Cost", color="Country",
-                                            hover_name="Country",
-                                            title="Top 20 Countries by Spend",
-                                            template="plotly_white")
-                    fig_bubble.add_hline(y=100, line_dash="dash", line_color="green")
-                    st.plotly_chart(fig_bubble, use_container_width=True)
-
-            st.markdown("### 📑 Chi tiết dữ liệu")
-            st.dataframe(
-                df_filtered.sort_values(by='Date', ascending=False).style.format({
-                    "Cost": "${:,.2f}", "Revenue": "${:,.2f}", "CPI": "${:,.3f}",
-                    "ROAS": "{:,.2f}%", "Installs": "{:,.0f}"
-                }),
-                use_container_width=True
-            )
-        else:
-            st.warning("Không có dữ liệu nào thỏa mãn điều kiện lọc.")
+            # Data Table
+            st.markdown("### 📑 Chi tiết Cohort")
+            st.dataframe(df_cohort_summary.sort_values('Date', ascending=False).style.format({
+                "Revenue": "${:,.2f}", "Cost": "${:,.2f}", "Installs": "{:,.0f}"
+            }), use_container_width=True)
 
     except Exception as e:
-        st.error(f"Lỗi hệ thống chi tiết: {e}")
-        # In ra columns hiện tại để debug nếu vẫn lỗi
-        st.write("Các cột hiện có trong DataFrame:", df.columns.tolist())
-
+        st.error(f"Có lỗi xảy ra: {e}")
+        st.write("Debug Info - Columns:", df.columns.tolist())
 else:
-    st.info("👈 Sếp vui lòng upload file CSV Cohort bên thanh menu trái nhé!")
+    st.info("👈 Upload file AdMob CSV để bắt đầu phân tích nhé sếp!")
