@@ -3,7 +3,7 @@ import pandas as pd
 import io
 
 # --- CẤU HÌNH TRANG ---
-st.set_page_config(page_title="AdMob LTV Analyzer V7", layout="wide", page_icon="💎")
+st.set_page_config(page_title="AdMob LTV & eCPM Analyzer V8.4", layout="wide", page_icon="💎")
 
 # --- SIDEBAR: CLEAR CACHE ---
 with st.sidebar:
@@ -13,9 +13,16 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
+# --- HÀM LÀM SẠCH DỮ LIỆU SỐ ---
+def clean_numeric_column(series):
+    s = series.astype(str).str.replace('%', '', regex=False)
+    s = s.str.replace('$', '', regex=False)
+    s = s.str.replace(',', '', regex=False)
+    return pd.to_numeric(s, errors='coerce')
+
 # --- HÀM LOAD DATA ---
 @st.cache_data
-def load_data(file):
+def load_data(file, file_type="cohort"):
     encodings = ['utf-8', 'utf-16', 'utf-16le', 'latin1']
     delimiters = [',', '\t', ';']
     
@@ -26,7 +33,6 @@ def load_data(file):
     for enc in encodings:
         try:
             content = bytes_data.decode(enc)
-            # Tự động detect separator
             first_line = content.split('\n')[0]
             detected_sep = ','
             max_count = 0
@@ -42,19 +48,24 @@ def load_data(file):
             continue
             
     if df is None:
-        st.error("❌ File hỏng hoặc sai định dạng encoding.")
-        st.stop()
+        return None
 
     df.columns = df.columns.str.strip()
     
-    # Mapping cột linh hoạt
-    column_mapping = {
-        'Install date': ['Date', 'Cohort Date', 'install_date'],
-        'Days since install': ['Day', 'Days', 'days_since_install'],
-        'LTV (USD)': ['LTV', 'ltv', 'LTV ($)'],
-        'Installs': ['Users', 'New Users', 'installs'],
-        'Install country': ['Country', 'Region', 'install_country']
-    }
+    if file_type == "cohort":
+        column_mapping = {
+            'Install date': ['Date', 'Cohort Date', 'install_date'],
+            'Days since install': ['Day', 'Days', 'days_since_install'],
+            'LTV (USD)': ['LTV', 'ltv', 'LTV ($)'],
+            'Installs': ['Users', 'New Users', 'installs'],
+            'Install country': ['Country', 'Region', 'install_country']
+        }
+    else: 
+        column_mapping = {
+            'Date': ['Date', 'date', 'Time'],
+            'Country': ['Country', 'Region', 'Country/Region'],
+            'eCPM': ['eCPM', 'RPM', 'Observed eCPM', 'eCPM ($)', 'Observed eCPM (USD)'] 
+        }
     
     rename_dict = {}
     for standard_col, variations in column_mapping.items():
@@ -66,73 +77,147 @@ def load_data(file):
     if rename_dict:
         df = df.rename(columns=rename_dict)
         
-    if 'Install date' in df.columns:
-        df['Install date'] = pd.to_datetime(df['Install date'], errors='coerce')
-        
+    date_col = 'Install date' if file_type == "cohort" else 'Date'
+    if date_col in df.columns:
+        df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+    
+    if file_type == "network":
+        for col in df.columns:
+            if col not in ['Date', 'Country']:
+                sample = df[col].dropna().iloc[0] if not df[col].dropna().empty else ""
+                if isinstance(sample, str):
+                    df[col] = clean_numeric_column(df[col])
+                    
     return df
 
 # --- GIAO DIỆN CHÍNH ---
-st.title("💎 AdMob LTV Analyzer (V7 - Flexible UI)")
+st.title("💎 AdMob LTV & eCPM Analyzer (V8.4)")
 st.markdown("---")
 
-uploaded_file = st.file_uploader("Upload file admob-report.csv", type=['csv', 'txt'])
+col_upload_1, col_upload_2 = st.columns(2)
 
-if uploaded_file:
-    df = load_data(uploaded_file)
+with col_upload_1:
+    st.subheader("1. File Cohort (LTV)")
+    cohort_file = st.file_uploader("Upload file Cohort Report", type=['csv', 'txt'], key="cohort")
+
+with col_upload_2:
+    st.subheader("2. File Network (eCPM)")
+    network_file = st.file_uploader("Upload file Network Report", type=['csv', 'txt'], key="network")
+
+if cohort_file:
+    # 1. XỬ LÝ FILE COHORT
+    df_cohort = load_data(cohort_file, file_type="cohort")
     
-    # --- KHU VỰC BỘ LỌC (FILTERS) ---
+    if df_cohort is None:
+        st.error("❌ File Cohort lỗi encoding.")
+        st.stop()
+        
     col_filter_1, col_filter_2 = st.columns(2)
     
     with col_filter_1:
-        # 1. Filter Country
-        country_list = sorted(df['Install country'].dropna().unique().tolist())
+        country_list = sorted(df_cohort['Install country'].dropna().unique().tolist())
         selected_country = st.selectbox("🌍 Chọn Quốc Gia (Country):", ["All"] + country_list)
     
     if selected_country != "All":
-        df_filtered = df[df['Install country'] == selected_country].copy()
+        df_filtered = df_cohort[df_cohort['Install country'] == selected_country].copy()
     else:
-        df_filtered = df.copy()
+        df_filtered = df_cohort.copy()
 
-    # --- XỬ LÝ DATA (PIVOT) ---
     try:
-        # Tổng hợp data
         df_agg = df_filtered.groupby(['Install date', 'Days since install']).agg({
             'LTV (USD)': 'mean', 
             'Installs': 'max'    
         }).reset_index()
 
-        # Pivot: Date x Days = LTV
         df_pivot = df_agg.pivot(index='Install date', columns='Days since install', values='LTV (USD)')
-        
-        # Lấy cột Installs
         df_installs = df_filtered[df_filtered['Days since install'] == 0].groupby('Install date')['Installs'].sum()
         
-        # Join lại
+        # Base DataFrame (Index là Install date)
         df_final = pd.DataFrame(df_installs).join(df_pivot)
         df_final['Country'] = selected_country
-        df_final = df_final.sort_index(ascending=False)
         
     except Exception as e:
-        st.error(f"❌ Lỗi cấu trúc file: {e}")
+        st.error(f"❌ Lỗi cấu trúc file Cohort: {e}")
         st.stop()
 
-    # --- TÙY CHỌN HIỂN THỊ CỘT (DYNAMIC COLUMNS) ---
+    # 2. XỬ LÝ FILE NETWORK
+    available_network_metrics = []
+    
+    if network_file:
+        df_network = load_data(network_file, file_type="network")
+        
+        if df_network is not None and 'eCPM' in df_network.columns:
+            has_country_col = 'Country' in df_network.columns
+            
+            if selected_country != "All" and has_country_col:
+                df_net_filtered = df_network[df_network['Country'] == selected_country].copy()
+            else:
+                df_net_filtered = df_network.copy()
+                if selected_country != "All" and not has_country_col:
+                    st.warning(f"⚠️ Lưu ý: Dữ liệu Network là Global (chung), đang ghép vào Cohort của {selected_country}.")
+
+            numeric_cols = df_net_filtered.select_dtypes(include=['float64', 'int64']).columns.tolist()
+            exclude_cols = ['Date', 'Country', 'eCPM'] 
+            available_network_metrics = [c for c in numeric_cols if c not in exclude_cols]
+
+    # --- TÙY CHỌN HIỂN THỊ CỘT ---
     all_available_days = sorted([col for col in df_final.columns if isinstance(col, (int, float))])
-    default_days = [d for d in [0, 1, 2, 3] if d in all_available_days]
+    default_days = [d for d in [0, 1, 3, 7] if d in all_available_days]
     
     with col_filter_2:
-        # 2. Filter Columns
         selected_days = st.multiselect(
-            "📊 Chọn các cột LTV muốn hiển thị:",
+            "📊 Chọn cột LTV (Days):",
             options=all_available_days,
             default=default_days
         )
+        
+        selected_net_metrics = []
+        if available_network_metrics:
+            selected_net_metrics = st.multiselect(
+                "📈 Chọn thêm chỉ số Network (Optional):",
+                options=available_network_metrics,
+                default=[] 
+            )
+
+    # --- JOIN DATA NETWORK VÀO COHORT ---
+    if network_file and df_network is not None:
+        agg_dict = {'eCPM': 'mean'} 
+        sum_keywords = ['earnings', 'impressions', 'clicks', 'requests', 'bids', 'users', 'viewers']
+        
+        for metric in selected_net_metrics:
+            metric_lower = metric.lower()
+            if any(k in metric_lower for k in sum_keywords) and 'rate' not in metric_lower and 'ctr' not in metric_lower:
+                agg_dict[metric] = 'sum'
+            else:
+                agg_dict[metric] = 'mean' 
+        
+        df_net_grouped = df_net_filtered.groupby('Date').agg(agg_dict)
+        
+        # Merge an toàn
+        df_final = df_final.join(df_net_grouped, how='left')
+
+    # Sort lại theo ngày giảm dần
+    df_final = df_final.sort_index(ascending=False)
     
     # --- CHUẨN BỊ DATAFRAME HIỂN THỊ ---
     display_df = df_final.reset_index()
+    
+    if 'index' in display_df.columns:
+        display_df = display_df.rename(columns={'index': 'Install date'})
+    
     base_cols = ['Country', 'Install date', 'Installs']
-    final_cols = base_cols + selected_days
-    display_df = display_df[final_cols]
+    
+    network_cols_to_show = []
+    if 'eCPM' in display_df.columns:
+        network_cols_to_show.append('eCPM')
+    
+    valid_selected_metrics = [m for m in selected_net_metrics if m in display_df.columns]
+    network_cols_to_show.extend(valid_selected_metrics)
+    
+    final_cols = base_cols + network_cols_to_show + selected_days
+    final_cols = [c for c in final_cols if c in display_df.columns]
+    
+    display_df = display_df[final_cols].copy()
 
     rename_map = {d: f"LTV D{d}" for d in selected_days}
     display_df = display_df.rename(columns=rename_map)
@@ -140,61 +225,83 @@ if uploaded_file:
     # --- HIỂN THỊ METRICS TỔNG QUAN ---
     st.subheader(f"📈 Hiệu suất trung bình ({selected_country})")
     
-    metric_cols_count = min(len(selected_days), 5)
-    if metric_cols_count > 0:
-        cols = st.columns(metric_cols_count)
-        for i in range(metric_cols_count):
-            day = selected_days[i]
+    total_metrics = len(selected_days) + len(network_cols_to_show)
+    cols = st.columns(min(total_metrics + 1, 6))
+    
+    col_idx = 0
+    
+    for net_metric in network_cols_to_show:
+        if col_idx < len(cols):
+            avg_val = display_df[net_metric].mean()
+            if "rate" in net_metric.lower() or "ctr" in net_metric.lower():
+                val_str = f"{avg_val:.2f}%"
+            elif "earnings" in net_metric.lower() or "usd" in net_metric.lower() or "ecpm" in net_metric.lower():
+                val_str = f"${avg_val:.2f}"
+            else:
+                val_str = f"{avg_val:,.0f}"
+                
+            cols[col_idx].metric(f"Avg {net_metric}", val_str)
+            col_idx += 1
+
+    for day in selected_days:
+        if col_idx < len(cols):
             col_name = f"LTV D{day}"
             valid_rows = display_df.dropna(subset=[col_name])
             if not valid_rows.empty and valid_rows['Installs'].sum() > 0:
                 w_avg = (valid_rows[col_name] * valid_rows['Installs']).sum() / valid_rows['Installs'].sum()
-                cols[i].metric(f"Avg {col_name}", f"${w_avg:.5f}")
-            else:
-                cols[i].metric(f"Avg {col_name}", "N/A")
+                cols[col_idx].metric(f"Avg {col_name}", f"${w_avg:.5f}")
+            col_idx += 1
 
     st.markdown("---")
     
-    # --- TÙY CHỈNH KÍCH THƯỚC BẢNG (NEW FEATURE) ---
+    # --- TÙY CHỈNH KÍCH THƯỚC BẢNG ---
     with st.expander("🛠️ Tùy chỉnh kích thước bảng (Table Settings)", expanded=False):
         col_setting_1, col_setting_2 = st.columns(2)
-        
         with col_setting_1:
-            # Checkbox để bật tắt chế độ Full Width
             use_full_width = st.checkbox("↔️ Full Width (Tràn màn hình)", value=True)
-            
             custom_width = None
             if not use_full_width:
-                # Nếu tắt Full Width thì hiện slider chỉnh pixel
-                custom_width = st.slider("Độ rộng bảng (px)", min_value=400, max_value=2000, value=1000, step=50)
-        
+                custom_width = st.slider("Độ rộng bảng (px)", 400, 2000, 1000, 50)
         with col_setting_2:
-            # Slider chỉnh chiều cao
-            table_height = st.slider("↕️ Chiều cao bảng (px)", min_value=200, max_value=1500, value=600, step=50)
+            table_height = st.slider("↕️ Chiều cao bảng (px)", 200, 1500, 600, 50)
 
     # --- DATA TABLE CHI TIẾT ---
     st.markdown("### 📋 Bảng chi tiết")
     
+    # FIX V8.4: Tối ưu độ rộng cột (width="small" hoặc "medium")
     column_config = {
-        "Install date": st.column_config.DateColumn("Cohort Date", format="YYYY-MM-DD"),
-        "Installs": st.column_config.NumberColumn("Users", format="%d"),
-        "Country": st.column_config.TextColumn("Country"),
+        "Install date": st.column_config.DateColumn("Date", format="YYYY-MM-DD", width="small"),
+        "Installs": st.column_config.NumberColumn("Users", format="%d", width="small"),
+        "Country": st.column_config.TextColumn("Country", width="small"),
     }
     
+    if 'eCPM' in display_df.columns:
+        column_config["eCPM"] = st.column_config.NumberColumn("eCPM", format="$%.2f", width="small")
+
+    for metric in valid_selected_metrics:
+        metric_lower = metric.lower()
+        if "rate" in metric_lower or "ctr" in metric_lower:
+             column_config[metric] = st.column_config.NumberColumn(metric, format="%.2f%%", width="small")
+        elif "earnings" in metric_lower or "usd" in metric_lower:
+             column_config[metric] = st.column_config.NumberColumn(metric, format="$%.2f", width="medium") # Earnings có thể số to nên để medium
+        else:
+             column_config[metric] = st.column_config.NumberColumn(metric, format="%d", width="small")
+
     for day in selected_days:
         column_config[f"LTV D{day}"] = st.column_config.NumberColumn(
             f"LTV D{day}", 
-            format="$%.5f" 
+            format="$%.5f",
+            width="small" # LTV thường số nhỏ, để small là đẹp
         )
 
     st.dataframe(
         display_df, 
         column_config=column_config, 
         hide_index=True,
-        use_container_width=use_full_width, # Dynamic Width (True/False)
-        width=custom_width,                 # Dynamic Width (px - chỉ nhận khi use_container_width=False)
-        height=table_height                 # Dynamic Height
+        use_container_width=use_full_width,
+        width=custom_width,
+        height=table_height
     )
 
 else:
-    st.info("👋 Chào sếp! Upload file CSV để bắt đầu soi LTV nhé.")
+    st.info("👋 Chào sếp! Vui lòng upload file Cohort trước.")
