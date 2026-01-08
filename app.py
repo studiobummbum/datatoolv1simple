@@ -3,7 +3,7 @@ import pandas as pd
 import io
 
 # --- CẤU HÌNH TRANG ---
-st.set_page_config(page_title="AdMob LTV & eCPM Analyzer V8.4", layout="wide", page_icon="💎")
+st.set_page_config(page_title="AdMob LTV & eCPM Analyzer V8.5", layout="wide", page_icon="💎")
 
 # --- SIDEBAR: CLEAR CACHE ---
 with st.sidebar:
@@ -91,7 +91,7 @@ def load_data(file, file_type="cohort"):
     return df
 
 # --- GIAO DIỆN CHÍNH ---
-st.title("💎 AdMob LTV & eCPM Analyzer (V8.4)")
+st.title("💎 AdMob LTV & eCPM Analyzer (V8.5)")
 st.markdown("---")
 
 col_upload_1, col_upload_2 = st.columns(2)
@@ -268,7 +268,6 @@ if cohort_file:
     # --- DATA TABLE CHI TIẾT ---
     st.markdown("### 📋 Bảng chi tiết")
     
-    # FIX V8.4: Tối ưu độ rộng cột (width="small" hoặc "medium")
     column_config = {
         "Install date": st.column_config.DateColumn("Date", format="YYYY-MM-DD", width="small"),
         "Installs": st.column_config.NumberColumn("Users", format="%d", width="small"),
@@ -283,7 +282,7 @@ if cohort_file:
         if "rate" in metric_lower or "ctr" in metric_lower:
              column_config[metric] = st.column_config.NumberColumn(metric, format="%.2f%%", width="small")
         elif "earnings" in metric_lower or "usd" in metric_lower:
-             column_config[metric] = st.column_config.NumberColumn(metric, format="$%.2f", width="medium") # Earnings có thể số to nên để medium
+             column_config[metric] = st.column_config.NumberColumn(metric, format="$%.2f", width="medium") 
         else:
              column_config[metric] = st.column_config.NumberColumn(metric, format="%d", width="small")
 
@@ -291,7 +290,7 @@ if cohort_file:
         column_config[f"LTV D{day}"] = st.column_config.NumberColumn(
             f"LTV D{day}", 
             format="$%.5f",
-            width="small" # LTV thường số nhỏ, để small là đẹp
+            width="small" 
         )
 
     st.dataframe(
@@ -302,6 +301,49 @@ if cohort_file:
         width=custom_width,
         height=table_height
     )
+
+    # =================================================================
+    # --- [NEW FEATURE V8.5] BIỂU ĐỒ TRỰC QUAN ---
+    # =================================================================
+    st.markdown("---")
+    st.subheader("📊 Biểu đồ xu hướng (Trend Charts)")
+    
+    # Chuẩn bị dữ liệu cho biểu đồ (cần index là Date để vẽ trục X)
+    chart_df = display_df.set_index('Install date').sort_index()
+    
+    # Lấy danh sách các cột số có thể vẽ được (trừ Country)
+    plottable_cols = [c for c in chart_df.columns if c != 'Country']
+    
+    # Mặc định chọn một vài chỉ số quan trọng nếu có
+    default_plot = []
+    if 'eCPM' in plottable_cols: default_plot.append('eCPM')
+    if f"LTV D{default_days[0]}" in plottable_cols: default_plot.append(f"LTV D{default_days[0]}")
+    
+    # UI chọn Metric để vẽ
+    col_chart_opt_1, col_chart_opt_2 = st.columns([3, 1])
+    
+    with col_chart_opt_1:
+        selected_plot_metrics = st.multiselect(
+            "Chọn chỉ số để vẽ biểu đồ (Metrics to plot):",
+            options=plottable_cols,
+            default=default_plot
+        )
+    
+    with col_chart_opt_2:
+        chart_type = st.radio("Loại biểu đồ:", ["Line Chart", "Area Chart", "Bar Chart"], horizontal=True)
+
+    if selected_plot_metrics:
+        # Vẽ biểu đồ
+        if chart_type == "Line Chart":
+            st.line_chart(chart_df[selected_plot_metrics])
+        elif chart_type == "Area Chart":
+            st.area_chart(chart_df[selected_plot_metrics])
+        else:
+            st.bar_chart(chart_df[selected_plot_metrics])
+            
+        st.caption(f"💡 Tip: Sếp nên chọn các chỉ số có cùng đơn vị (ví dụ: cùng là $ hoặc cùng là %) để biểu đồ dễ nhìn hơn.")
+    else:
+        st.info("👈 Vui lòng chọn ít nhất một chỉ số để hiển thị biểu đồ.")
 
 else:
     st.info("👋 Chào sếp! Vui lòng upload file Cohort trước.")
